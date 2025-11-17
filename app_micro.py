@@ -25,11 +25,11 @@ matplotlib.rcParams["axes.unicode_minus"] = False
 
 # ---------- 페이지 기본 설정 ---------- #
 st.set_page_config(
-    page_title="초단기 2분봉/1분봉 방향성 예측 툴",
+    page_title="단타로 과자 먹자",
     layout="wide",
 )
 
-st.title("⚡ 최근 60일 2분봉 + 실시간 1분봉 초단기 예측 웹앱")
+st.title("⚡ 최근 60일 2분봉 학습 / 실시간 1분봉 예측 웹앱")
 st.caption("2분봉 60일로 학습하고, 1분봉 실시간 차트에서 시그널 + 예상 가격 확인")
 
 
@@ -269,7 +269,7 @@ with tab4:
     if models is None or model_df is None or feature_cols is None or horizons is None:
         st.warning("먼저 2분봉 기반 모델을 학습해 주세요. (탭 3)")
     else:
-        # ----- 4-1. 예측 결과 (2분봉 최신 샘플 기준) ----- #
+        # ----- 4-1. 예측 결과 (2분봉 최신 샘플 기준 / 테이블만) ----- #
         latest_row = model_df.iloc[-1]
         probs = predict_latest(models, latest_row, feature_cols)
 
@@ -286,21 +286,13 @@ with tab4:
         prob_df = pd.DataFrame(rows).set_index("horizon_min")
         st.dataframe(prob_df.style.format({"up_prob": "{:.2%}"}))
 
-        fig, ax = plt.subplots(figsize=(6, 3))
-        ax.bar(prob_df.index.astype(str), prob_df["up_prob"])
-        ax.set_ylim(0, 1)
-        ax.set_ylabel("상승 확률")
-        ax.set_xlabel("예측 타임프레임 (분)")
-        ax.set_title("현재 2분봉 기준 각 타임프레임 상승 확률")
-        st.pyplot(fig)
-
         st.markdown("---")
 
         # ----- 4-2. 실시간 1분봉 차트 & 현재가 + 예상가 ----- #
         st.markdown("### 🕯 1분봉 실시간 캔들 차트 + 현재가 + 예상 가격")
 
-        # 상단: 새로고침 옵션
-        col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([1, 1, 2])
+        # 상단: 새로고침 옵션 + 예상 시간 선택
+        col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([1.2, 1.2, 2.6])
         with col_ctrl1:
             auto_refresh = st.checkbox("자동 새로고침 (5초)", value=False)
         with col_ctrl2:
@@ -313,6 +305,28 @@ with tab4:
                 value=150,
                 step=10,
             )
+
+        # 예상 시간 체크박스들
+        st.markdown("#### ⏱ 예상 가격 표시 옵션")
+        col_pred1, col_pred2, col_pred3, col_pred4, col_pred5 = st.columns(5)
+        with col_pred1:
+            show_1 = st.checkbox("+1분", value=True)
+        with col_pred2:
+            show_3 = st.checkbox("+3분", value=True)
+        with col_pred3:
+            show_10 = st.checkbox("+10분", value=False)
+        with col_pred4:
+            show_30 = st.checkbox("+30분", value=False)
+        with col_pred5:
+            show_60 = st.checkbox("+60분", value=False)
+
+        horizon_flags = {
+            1: show_1,
+            3: show_3,
+            10: show_10,
+            30: show_30,
+            60: show_60,
+        }
 
         # 수동 새로고침 버튼 → 즉시 rerun
         if refresh_now:
@@ -332,20 +346,18 @@ with tab4:
             last_price = df_plot["Close"].iloc[-1]
             last_time = df_plot.index[-1]
 
-            # ===== 1분 뒤 / 3분 뒤 예상 가격 (단순 추세 기반) ===== #
-            # 최근 N개로 선형회귀해서 기울기 추정 → 분당 변화량 * 1, 3
+            # ===== 최근 추세 기반 여러 시간대 예상 가격 ===== #
             reg_window = min(50, len(df_plot))
             y = df_plot["Close"].tail(reg_window).values
             x = np.arange(reg_window)
 
+            preds = {}  # {horizon_min: price}
             if reg_window >= 2:
                 slope, intercept = np.polyfit(x, y, 1)
-                # x= reg_window-1 이 현재 캔들에 대응 → 여기서 +1, +3
-                pred_1m = last_price + slope * 1
-                pred_3m = last_price + slope * 3
-            else:
-                pred_1m = float("nan")
-                pred_3m = float("nan")
+                for h_min, flag in horizon_flags.items():
+                    if flag:
+                        preds[h_min] = last_price + slope * h_min
+            # reg_window가 너무 작으면 preds는 비게 됨
 
             # 메인 레이아웃: 차트(좌) + 정보(우)
             chart_col, info_col = st.columns([4, 1])
@@ -364,9 +376,31 @@ with tab4:
                     ]
                 )
 
-                # 예측 가격을 수평선으로 표시
+                # 예측 가격 수평선 + annotation
                 shapes = []
-                if np.isfinite(pred_1m):
+                annotations = []
+
+                # annotation의 x 위치를 가로로 분산 (0.05, 0.25, 0.45, 0.65, 0.85 ...)
+                x_positions = {
+                    1: 0.05,
+                    3: 0.25,
+                    10: 0.45,
+                    30: 0.65,
+                    60: 0.85,
+                }
+                colors = {
+                    1: "blue",
+                    3: "orange",
+                    10: "green",
+                    30: "purple",
+                    60: "red",
+                }
+
+                for h_min, price in preds.items():
+                    if not np.isfinite(price):
+                        continue
+
+                    # 수평선
                     shapes.append(
                         dict(
                             type="line",
@@ -374,22 +408,24 @@ with tab4:
                             x0=0,
                             x1=1,
                             yref="y",
-                            y0=pred_1m,
-                            y1=pred_1m,
-                            line=dict(color="blue", width=1, dash="dot"),
+                            y0=price,
+                            y1=price,
+                            line=dict(color=colors.get(h_min, "gray"), width=1, dash="dot"),
                         )
                     )
-                if np.isfinite(pred_3m):
-                    shapes.append(
+
+                    # 텍스트 위치 (가로 분산)
+                    x_anno = x_positions.get(h_min, 0.5)
+                    annotations.append(
                         dict(
-                            type="line",
                             xref="paper",
-                            x0=0,
-                            x1=1,
-                            yref="y",
-                            y0=pred_3m,
-                            y1=pred_3m,
-                            line=dict(color="orange", width=1, dash="dot"),
+                            x=x_anno,
+                            y=price,
+                            xanchor="left",
+                            yanchor="bottom",
+                            text=f"+{h_min}분 예상",
+                            showarrow=False,
+                            font=dict(size=10, color=colors.get(h_min, "gray")),
                         )
                     )
 
@@ -399,38 +435,8 @@ with tab4:
                     height=450,
                     title=f"{ticker} 1분봉 캔들 (최근 {n_candles}개)",
                     shapes=shapes,
+                    annotations=annotations,
                 )
-
-                # 예측 레벨에 텍스트 힌트 (범례 대신)
-                annotations = []
-                if np.isfinite(pred_1m):
-                    annotations.append(
-                        dict(
-                            xref="paper",
-                            x=0.01,
-                            y=pred_1m,
-                            xanchor="left",
-                            yanchor="bottom",
-                            text="+1분 예상",
-                            showarrow=False,
-                            font=dict(size=10, color="blue"),
-                        )
-                    )
-                if np.isfinite(pred_3m):
-                    annotations.append(
-                        dict(
-                            xref="paper",
-                            x=0.01,
-                            y=pred_3m,
-                            xanchor="left",
-                            yanchor="bottom",
-                            text="+3분 예상",
-                            showarrow=False,
-                            font=dict(size=10, color="orange"),
-                        )
-                    )
-                if annotations:
-                    fig_c.update_layout(annotations=annotations)
 
                 st.plotly_chart(fig_c, use_container_width=True)
 
@@ -439,20 +445,18 @@ with tab4:
                 st.metric(label="Price", value=f"{last_price:,.2f}")
 
                 st.markdown("#### 🔮 예상가")
-                if np.isfinite(pred_1m):
-                    st.metric(label="+1분 예상", value=f"{pred_1m:,.2f}")
+                if preds:
+                    # horizon 순서대로 깔끔하게 출력
+                    for h_min in sorted(preds.keys()):
+                        price = preds[h_min]
+                        st.metric(label=f"+{h_min}분 예상", value=f"{price:,.2f}")
                 else:
-                    st.write("+1분 예상: 계산 불가")
-
-                if np.isfinite(pred_3m):
-                    st.metric(label="+3분 예상", value=f"{pred_3m:,.2f}")
-                else:
-                    st.write("+3분 예상: 계산 불가")
+                    st.write("예상가: 계산 불가 (데이터 부족)")
 
                 st.markdown("#### 🕒 시각")
                 st.write(last_time.strftime("%Y-%m-%d %H:%M:%S"))
 
-                # 장 상태 대략 표시 (시간대 기준)
+                # 장 상태 대략 표시 (시간대 기준, 미국장 가정)
                 h = last_time.hour
                 if 4 <= h < 9:
                     st.caption("프리장(Pre-market) 추정")
@@ -462,7 +466,7 @@ with tab4:
                     st.caption("애프터장(After-hours) 추정")
 
                 st.markdown("---")
-                st.caption("※ 1/3분 예상가는 최근 추세(선형회귀) 기반 단순 추정값입니다.")
+                st.caption("※ 예상 가격은 최근 추세(선형회귀) 기반 단순 추정값입니다.")
 
             st.markdown("#### 🔎 최근 1분봉 원시 데이터 (마지막 5개 캔들)")
             st.dataframe(intraday_df.tail(5))
