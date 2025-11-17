@@ -15,8 +15,8 @@ from core_micro import (
     predict_latest,
 )
 
-# ---------- 한글 폰트 설정 (Windows 기준: 맑은 고딕) ---------- #
-matplotlib.rcParams["font.family"] = "Malgun Gothic"
+# ---------- 한글 폰트 설정 (Windows 기준: 굴림) ---------- #
+matplotlib.rcParams["font.family"] = "Gulim"
 matplotlib.rcParams["axes.unicode_minus"] = False
 
 # ---------- 페이지 기본 설정 ---------- #
