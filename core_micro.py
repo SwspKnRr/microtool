@@ -64,6 +64,45 @@ def fetch_2min_data(ticker: str, days: int = 60) -> pd.DataFrame:
     return df
 
 
+# ---------- 1분봉 실시간/단기 데이터 다운로드 (최대 7일) ---------- #
+def fetch_1min_intraday(ticker: str, days: int = 3) -> pd.DataFrame:
+    """
+    최근 days일간 1분봉 데이터 (실시간 시그널용)
+    - yfinance 1분봉 최대 7일
+    - prepost=True 로 프리/애프터 포함
+    - 주말 제거
+    """
+    if days > 7:
+        days = 7
+
+    df = yf.download(
+        ticker,
+        period=f"{days}d",
+        interval="1m",
+        auto_adjust=True,
+        prepost=True,
+        progress=False,
+    )
+
+    if df is None or df.empty:
+        return df
+
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = [c[0] for c in df.columns]
+
+    df = df.rename(columns=str.title)
+
+    if hasattr(df.index, "tz"):
+        df = df.tz_localize(None)
+
+    df = df.sort_index()
+
+    # 주말 제거
+    df = df[df.index.dayofweek < 5]
+
+    return df
+
+
 # ---------- 피처 생성 ---------- #
 def build_feature_frame(
     df_raw: pd.DataFrame,
@@ -72,7 +111,7 @@ def build_feature_frame(
 ) -> pd.DataFrame:
     df = df_raw.copy()
 
-    # 기본 수익률
+    # 기본 수익률 (2분 수익률)
     df["return_2m"] = df["Close"].pct_change()
 
     # 단기 이동평균

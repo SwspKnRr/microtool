@@ -1,14 +1,16 @@
 # app_micro.py
+import time
 import datetime as dt
 
 import matplotlib.pyplot as plt
 import matplotlib
 import pandas as pd
 import streamlit as st
-import mplfinance as mpf
+import plotly.graph_objects as go
 
 from core_micro import (
     fetch_2min_data,
+    fetch_1min_intraday,
     build_feature_frame,
     build_targets,
     get_feature_target_matrices,
@@ -22,18 +24,18 @@ matplotlib.rcParams["axes.unicode_minus"] = False
 
 # ---------- 페이지 기본 설정 ---------- #
 st.set_page_config(
-    page_title="초단기 2분봉 방향성 예측 툴",
+    page_title="초단기 2분봉/1분봉 방향성 예측 툴",
     layout="wide",
 )
 
-st.title("⚡ 최근 60일 2분봉 기반 초단기 방향성 예측 웹앱")
-st.caption("최근 최대 60일 2분봉 데이터를 기반으로 5/10/30분 + 사용자 정의 X분 후 상승 확률 예측")
+st.title("⚡ 최근 60일 2분봉 + 실시간 1분봉 초단기 예측 웹앱")
+st.caption("2분봉 60일로 학습하고, 1분봉 실시간 차트에서 시그널 확인")
 
 
 # ---------- 세션 상태 초기화 ---------- #
 def init_state():
     defaults = {
-        "raw_df": None,
+        "raw_df": None,          # 2분봉 데이터
         "feat_df": None,
         "model_df": None,
         "horizons": None,
@@ -57,7 +59,7 @@ with st.sidebar:
 
     ticker = st.text_input("티커 (예: SPY, QQQ, AAPL 등)", value="QQQ")
 
-    days = st.slider("최근 N일 (1~60일)", min_value=1, max_value=60, value=40, step=1)
+    days = st.slider("최근 N일 (1~60일, 2분봉 학습용)", min_value=1, max_value=60, value=40, step=1)
 
     st.markdown("---")
     st.subheader("⏱ 예측 타임프레임")
@@ -82,16 +84,16 @@ with st.sidebar:
     )
 
     st.markdown("---")
-    st.caption("① 데이터 다운로드 → ② 피처/타깃 생성 → ③ 모델 학습 → ④ 실시간 시그널 확인")
+    st.caption("① 2분봉 데이터 다운로드 → ② 피처/타깃 생성 → ③ 모델 학습 → ④ 1분봉 실시간 시그널")
 
 
 # ---------- 메인 탭 구성 ---------- #
 tab1, tab2, tab3, tab4 = st.tabs(
     [
-        "1️⃣ 데이터 다운로드",
+        "1️⃣ 데이터 다운로드 (2분봉)",
         "2️⃣ 피처 & 타깃 생성",
         "3️⃣ 모델 학습",
-        "4️⃣ 실시간 시그널",
+        "4️⃣ 실시간 시그널 (1분봉)",
     ]
 )
 
@@ -130,7 +132,7 @@ with tab1:
     if st.session_state["raw_df"] is not None:
         df_raw = st.session_state["raw_df"]
         st.markdown("---")
-        st.write("📊 종가 간단 차트 (최근 500캔들)")
+        st.write("📊 종가 간단 라인 차트 (최근 500캔들)")
         fig, ax = plt.subplots(figsize=(10, 4))
         ax.plot(df_raw["Close"].tail(500))
         ax.set_title(f"{ticker} 2분봉 종가 (최근 500캔들)")
@@ -141,7 +143,7 @@ with tab1:
 
 # ==================== 2) 피처 & 타깃 생성 탭 ==================== #
 with tab2:
-    st.subheader("2️⃣ 피처 & 타깃 생성")
+    st.subheader("2️⃣ 피처 & 타깃 생성 (2분봉 기반)")
 
     df_raw = st.session_state["raw_df"]
     if df_raw is None:
@@ -213,7 +215,7 @@ with tab2:
 
 # ==================== 3) 모델 학습 탭 ==================== #
 with tab3:
-    st.subheader("3️⃣ 모델 학습")
+    st.subheader("3️⃣ 모델 학습 (2분봉 피처 기반)")
 
     X = st.session_state["X"]
     y_dict = st.session_state["y_dict"]
@@ -254,9 +256,9 @@ with tab3:
             )
 
 
-# ==================== 4) 실시간 시그널 탭 ==================== #
+# ==================== 4) 실시간 시그널 탭 (1분봉) ==================== #
 with tab4:
-    st.subheader("4️⃣ 실시간 시그널 (가장 최근 캔들 기준)")
+    st.subheader("4️⃣ 실시간 시그널 (1분봉 / 현재가 / 캔들차트)")
 
     models = st.session_state["models"]
     model_df = st.session_state["model_df"]
@@ -264,13 +266,13 @@ with tab4:
     horizons = st.session_state["horizons"]
 
     if models is None or model_df is None or feature_cols is None or horizons is None:
-        st.warning("먼저 모델을 학습해 주세요. (탭 3)")
+        st.warning("먼저 2분봉 기반 모델을 학습해 주세요. (탭 3)")
     else:
+        # ----- 4-1. 예측 결과 (2분봉 최신 샘플 기준) ----- #
         latest_row = model_df.iloc[-1]
         probs = predict_latest(models, latest_row, feature_cols)
 
-        # ----- 4-1. 예측 확률 표/그래프 ----- #
-        st.markdown("### 🔮 현재 시점 기준 예측 결과")
+        st.markdown("### 🔮 현재(가장 최근 2분봉) 기준 예측 결과")
 
         rows = []
         for h in sorted(probs.keys()):
@@ -293,27 +295,86 @@ with tab4:
 
         st.markdown("---")
 
-        # ----- 4-2. 실시간 2분봉 캔들 차트 ----- #
-        st.markdown("### 🕯 최근 2분봉 캔들 차트")
+        # ----- 4-2. 실시간 1분봉 차트 & 현재가 ----- #
+        st.markdown("### 🕯 1분봉 실시간 캔들 차트 + 현재가")
 
-        raw_df = st.session_state["raw_df"]
-        if raw_df is not None and not raw_df.empty:
-            # 최근 N캔들만 표시 (예: 100개)
-            last_n = 100
-            df_plot = raw_df.tail(last_n).copy()
-            df_plot.index.name = "Date"
-
-            fig2, ax2 = plt.subplots(figsize=(10, 4))
-            mpf.plot(
-                df_plot,
-                type="candle",
-                ax=ax2,
-                style="classic",
-                show_nontrading=False,
+        # 상단: 새로고침 옵션
+        col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([1, 1, 2])
+        with col_ctrl1:
+            auto_refresh = st.checkbox("자동 새로고침 (5초)", value=False)
+        with col_ctrl2:
+            refresh_now = st.button("🔄 지금 새로고침")
+        with col_ctrl3:
+            n_candles = st.slider(
+                "표시할 캔들 수 (1분봉)",
+                min_value=50,
+                max_value=500,
+                value=150,
+                step=10,
             )
-            st.pyplot(fig2)
 
-            st.markdown("#### 🔎 최근 원시 데이터 (마지막 5개 캔들)")
-            st.dataframe(raw_df.tail(5))
+        # 1분봉 데이터 불러오기
+        with st.spinner("1분봉 데이터 불러오는 중..."):
+            try:
+                intraday_df = fetch_1min_intraday(ticker, days=3)
+            except Exception as e:
+                st.error(f"1분봉 데이터 다운로드 중 오류 발생: {e}")
+                intraday_df = None
+
+        if intraday_df is not None and not intraday_df.empty:
+            df_plot = intraday_df.tail(n_candles).copy()
+
+            last_price = df_plot["Close"].iloc[-1]
+            last_time = df_plot.index[-1]
+
+            # 메인 레이아웃: 차트(좌) + 현재가(우)
+            chart_col, info_col = st.columns([4, 1])
+
+            with chart_col:
+                fig_c = go.Figure(
+                    data=[
+                        go.Candlestick(
+                            x=df_plot.index,
+                            open=df_plot["Open"],
+                            high=df_plot["High"],
+                            low=df_plot["Low"],
+                            close=df_plot["Close"],
+                            name="1분봉",
+                        )
+                    ]
+                )
+                fig_c.update_layout(
+                    xaxis_rangeslider_visible=False,
+                    margin=dict(l=10, r=10, t=40, b=40),
+                    height=450,
+                    title=f"{ticker} 1분봉 캔들 (최근 {n_candles}개)",
+                )
+                st.plotly_chart(fig_c, use_container_width=True)
+
+            with info_col:
+                st.markdown("#### 💰 현재가")
+                st.metric(label="Price", value=f"{last_price:,.2f}")
+                st.markdown("#### 🕒 시각")
+                st.write(last_time.strftime("%Y-%m-%d %H:%M:%S"))
+
+                # 장 상태 대략 표시 (시간대 기준)
+                h = last_time.hour
+                if 4 <= h < 9:
+                    st.caption("프리장(Pre-market) 추정")
+                elif 9 <= h < 16:
+                    st.caption("정규장(Regular) 추정")
+                else:
+                    st.caption("애프터장(After-hours) 추정")
+
+                st.markdown("---")
+                st.caption("※ 야후 파이낸스 데이터 특성상 약간의 지연이 있을 수 있음.")
+
+            st.markdown("#### 🔎 최근 1분봉 원시 데이터 (마지막 5개 캔들)")
+            st.dataframe(intraday_df.tail(5))
         else:
-            st.info("원시 데이터(raw_df)가 없습니다. 탭 1에서 다시 다운로드해 주세요.")
+            st.info("1분봉 데이터를 가져오지 못했습니다. 티커/시간대를 다시 확인해 주세요.")
+
+        # 자동 새로고침 로직 (간단한 5초 주기)
+        if auto_refresh:
+            time.sleep(5)
+            st.experimental_rerun()
