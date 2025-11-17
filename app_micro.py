@@ -23,13 +23,13 @@ from core_micro import (
 matplotlib.rcParams["font.family"] = "Gulim"
 matplotlib.rcParams["axes.unicode_minus"] = False
 
-# ---------- 페이지 기본 설정 ---------- #
+# ---------- 페이지 기본 설정 ---------- #단타로 과자 먹자
 st.set_page_config(
-    page_title="단타로 과자 먹자",
+    page_title="최근 60일 2분봉 학습 / 실시간 1분봉 예측 웹앱",
     layout="wide",
 )
 
-st.title("⚡ 최근 60일 2분봉 학습 / 실시간 1분봉 예측 웹앱")
+st.title("⚡ 단타로 과자 먹자")
 st.caption("2분봉 60일로 학습하고, 1분봉 실시간 차트에서 시그널 + 예상 가격 확인")
 
 
