@@ -21,8 +21,11 @@ from core_micro import (
 )
 
 # ---------- 한글 폰트 설정 (Windows 기준: 맑은 고딕) ---------- #
-matplotlib.rcParams["font.family"] = "Malgun Gothic"
+matplotlib.rcParams["font.family"] = "Gulim"
 matplotlib.rcParams["axes.unicode_minus"] = False
+
+
+
 
 # ---------- 공통 유틸 함수들 (타임존 & 세션 처리) ---------- #
 
@@ -119,14 +122,14 @@ def get_session_label_kst(ts: pd.Timestamp, open_kst: dt.time, close_kst: dt.tim
     return "애프터장(After-hours)"
 
 
-# ---------- 페이지 기본 설정 ---------- #
+# ---------- 페이지 기본 설정 ---------- #단타로 과자 먹자
 st.set_page_config(
-    page_title="초단기 2분봉/1분봉 방향성 예측 툴 (KST 기준)",
+    page_title="최근 60일 2분봉 학습 / 실시간 1분봉 예측 웹앱",
     layout="wide",
 )
 
-st.title("⚡ KST 기준 2분봉 학습 + 1분봉 실시간 초단기 예측 웹앱")
-st.caption("모든 시간은 한국시간(KST, UTC+9) 기준으로 표시 / 미국장 시간은 DST 체크박스로 제어")
+st.title("⚡ 단타로 과자 먹자")
+st.caption("2분봉 60일로 학습하고, 1분봉 실시간 차트에서 시그널 + 예상 가격 확인")
 
 
 # ---------- 세션 상태 초기화 ---------- #
