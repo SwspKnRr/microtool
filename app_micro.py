@@ -494,12 +494,12 @@ with tab4:
                             low=df_plot["Low"],
                             close=df_plot["Close"],
                             increasing=dict(
-                               line=dict(color="#FF8A8A"),   # 파스텔 레드
-                               fillcolor="#FF8A8A",
+                               line=dict(color="#FF4949"),   # 파스텔 레드
+                               fillcolor="#FF4949",
                             ),
                              decreasing=dict(
-                               line=dict(color="#6EA6FF"),   # 파스텔 블루
-                               fillcolor="#6EA6FF",
+                               line=dict(color="#3C87FF"),   # 파스텔 블루
+                               fillcolor="#3C87FF",
                             ),
                             name="1분봉",
                         )
