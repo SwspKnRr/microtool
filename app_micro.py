@@ -5,6 +5,7 @@ import datetime as dt
 import matplotlib.pyplot as plt
 import matplotlib
 import pandas as pd
+import numpy as np
 import streamlit as st
 import plotly.graph_objects as go
 
@@ -29,7 +30,7 @@ st.set_page_config(
 )
 
 st.title("⚡ 최근 60일 2분봉 + 실시간 1분봉 초단기 예측 웹앱")
-st.caption("2분봉 60일로 학습하고, 1분봉 실시간 차트에서 시그널 확인")
+st.caption("2분봉 60일로 학습하고, 1분봉 실시간 차트에서 시그널 + 예상 가격 확인")
 
 
 # ---------- 세션 상태 초기화 ---------- #
@@ -258,7 +259,7 @@ with tab3:
 
 # ==================== 4) 실시간 시그널 탭 (1분봉) ==================== #
 with tab4:
-    st.subheader("4️⃣ 실시간 시그널 (1분봉 / 현재가 / 캔들차트)")
+    st.subheader("4️⃣ 실시간 시그널 (1분봉 / 현재가 / 캔들차트 + 예상 가격)")
 
     models = st.session_state["models"]
     model_df = st.session_state["model_df"]
@@ -295,8 +296,8 @@ with tab4:
 
         st.markdown("---")
 
-        # ----- 4-2. 실시간 1분봉 차트 & 현재가 ----- #
-        st.markdown("### 🕯 1분봉 실시간 캔들 차트 + 현재가")
+        # ----- 4-2. 실시간 1분봉 차트 & 현재가 + 예상가 ----- #
+        st.markdown("### 🕯 1분봉 실시간 캔들 차트 + 현재가 + 예상 가격")
 
         # 상단: 새로고침 옵션
         col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([1, 1, 2])
@@ -313,6 +314,10 @@ with tab4:
                 step=10,
             )
 
+        # 수동 새로고침 버튼 → 즉시 rerun
+        if refresh_now:
+            st.rerun()
+
         # 1분봉 데이터 불러오기
         with st.spinner("1분봉 데이터 불러오는 중..."):
             try:
@@ -327,7 +332,22 @@ with tab4:
             last_price = df_plot["Close"].iloc[-1]
             last_time = df_plot.index[-1]
 
-            # 메인 레이아웃: 차트(좌) + 현재가(우)
+            # ===== 1분 뒤 / 3분 뒤 예상 가격 (단순 추세 기반) ===== #
+            # 최근 N개로 선형회귀해서 기울기 추정 → 분당 변화량 * 1, 3
+            reg_window = min(50, len(df_plot))
+            y = df_plot["Close"].tail(reg_window).values
+            x = np.arange(reg_window)
+
+            if reg_window >= 2:
+                slope, intercept = np.polyfit(x, y, 1)
+                # x= reg_window-1 이 현재 캔들에 대응 → 여기서 +1, +3
+                pred_1m = last_price + slope * 1
+                pred_3m = last_price + slope * 3
+            else:
+                pred_1m = float("nan")
+                pred_3m = float("nan")
+
+            # 메인 레이아웃: 차트(좌) + 정보(우)
             chart_col, info_col = st.columns([4, 1])
 
             with chart_col:
@@ -343,17 +363,92 @@ with tab4:
                         )
                     ]
                 )
+
+                # 예측 가격을 수평선으로 표시
+                shapes = []
+                if np.isfinite(pred_1m):
+                    shapes.append(
+                        dict(
+                            type="line",
+                            xref="paper",
+                            x0=0,
+                            x1=1,
+                            yref="y",
+                            y0=pred_1m,
+                            y1=pred_1m,
+                            line=dict(color="blue", width=1, dash="dot"),
+                        )
+                    )
+                if np.isfinite(pred_3m):
+                    shapes.append(
+                        dict(
+                            type="line",
+                            xref="paper",
+                            x0=0,
+                            x1=1,
+                            yref="y",
+                            y0=pred_3m,
+                            y1=pred_3m,
+                            line=dict(color="orange", width=1, dash="dot"),
+                        )
+                    )
+
                 fig_c.update_layout(
                     xaxis_rangeslider_visible=False,
                     margin=dict(l=10, r=10, t=40, b=40),
                     height=450,
                     title=f"{ticker} 1분봉 캔들 (최근 {n_candles}개)",
+                    shapes=shapes,
                 )
+
+                # 예측 레벨에 텍스트 힌트 (범례 대신)
+                annotations = []
+                if np.isfinite(pred_1m):
+                    annotations.append(
+                        dict(
+                            xref="paper",
+                            x=0.01,
+                            y=pred_1m,
+                            xanchor="left",
+                            yanchor="bottom",
+                            text="+1분 예상",
+                            showarrow=False,
+                            font=dict(size=10, color="blue"),
+                        )
+                    )
+                if np.isfinite(pred_3m):
+                    annotations.append(
+                        dict(
+                            xref="paper",
+                            x=0.01,
+                            y=pred_3m,
+                            xanchor="left",
+                            yanchor="bottom",
+                            text="+3분 예상",
+                            showarrow=False,
+                            font=dict(size=10, color="orange"),
+                        )
+                    )
+                if annotations:
+                    fig_c.update_layout(annotations=annotations)
+
                 st.plotly_chart(fig_c, use_container_width=True)
 
             with info_col:
                 st.markdown("#### 💰 현재가")
                 st.metric(label="Price", value=f"{last_price:,.2f}")
+
+                st.markdown("#### 🔮 예상가")
+                if np.isfinite(pred_1m):
+                    st.metric(label="+1분 예상", value=f"{pred_1m:,.2f}")
+                else:
+                    st.write("+1분 예상: 계산 불가")
+
+                if np.isfinite(pred_3m):
+                    st.metric(label="+3분 예상", value=f"{pred_3m:,.2f}")
+                else:
+                    st.write("+3분 예상: 계산 불가")
+
                 st.markdown("#### 🕒 시각")
                 st.write(last_time.strftime("%Y-%m-%d %H:%M:%S"))
 
@@ -367,7 +462,7 @@ with tab4:
                     st.caption("애프터장(After-hours) 추정")
 
                 st.markdown("---")
-                st.caption("※ 야후 파이낸스 데이터 특성상 약간의 지연이 있을 수 있음.")
+                st.caption("※ 1/3분 예상가는 최근 추세(선형회귀) 기반 단순 추정값입니다.")
 
             st.markdown("#### 🔎 최근 1분봉 원시 데이터 (마지막 5개 캔들)")
             st.dataframe(intraday_df.tail(5))
@@ -377,4 +472,4 @@ with tab4:
         # 자동 새로고침 로직 (간단한 5초 주기)
         if auto_refresh:
             time.sleep(5)
-            st.experimental_rerun()
+            st.rerun()
