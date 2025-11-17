@@ -32,6 +32,7 @@ st.set_page_config(
 st.title("⚡ 단타로 과자 먹자")
 st.caption("2분봉 60일로 학습하고, 1분봉 실시간 차트에서 시그널 + 예상 가격 확인")
 
+
 # ---------- 세션 상태 초기화 ---------- #
 def init_state():
     defaults = {
@@ -258,7 +259,7 @@ with tab3:
 
 # ==================== 4) 실시간 시그널 탭 (1분봉) ==================== #
 with tab4:
-    st.subheader("4️⃣ 실시간 시그널 (1분봉 / 현재가 / 캔들차트 + 모델 보정 예상가)")
+    st.subheader("4️⃣ 실시간 시그널 (1분봉 / 현재가 / 모델 보정 예상가 + 과거 예측 검증)")
 
     models = st.session_state["models"]
     model_df = st.session_state["model_df"]
@@ -288,9 +289,9 @@ with tab4:
         st.markdown("---")
 
         # ----- 4-2. 실시간 1분봉 차트 & 현재가 + 모델 보정 예상가 ----- #
-        st.markdown("### 🕯 1분봉 실시간 캔들 차트 + 현재가 + 모델 보정 예상 가격")
+        st.markdown("### 🕯 1분봉 실시간 캔들 차트 + 현재가 + 모델 보정 예상가")
 
-        # 상단: 새로고침 옵션 + 예상 시간 선택
+        # 상단: 새로고침 옵션 + 캔들 수
         col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([1.2, 1.2, 2.6])
         with col_ctrl1:
             auto_refresh = st.checkbox("자동 새로고침 (5초)", value=False)
@@ -319,12 +320,22 @@ with tab4:
         with col_pred5:
             show_60 = st.checkbox("+60분", value=False)
 
+        col_pred6, col_pred7, col_pred8 = st.columns(3)
+        with col_pred6:
+            show_120 = st.checkbox("+2시간", value=False)   # 120분
+        with col_pred7:
+            show_300 = st.checkbox("+5시간", value=False)   # 300분
+        with col_pred8:
+            show_close = st.checkbox("종가", value=False)
+
         horizon_flags = {
             1: show_1,
             3: show_3,
             10: show_10,
             30: show_30,
             60: show_60,
+            120: show_120,
+            300: show_300,
         }
 
         # 수동 새로고침 버튼 → 즉시 rerun
@@ -350,7 +361,8 @@ with tab4:
             y = df_plot["Close"].tail(reg_window).values
             x = np.arange(reg_window)
 
-            preds = {}  # {horizon_min: adjusted_price}
+            preds: dict[int, float] = {}  # {horizon_min: adjusted_price}
+            pred_close = None  # 종가 예상 (있으면 float)
 
             # 모델 horizon 리스트와 probs dict에서 쓸 키 준비
             model_horizons = list(probs.keys())
@@ -364,31 +376,110 @@ with tab4:
 
             if reg_window >= 2:
                 slope, intercept = np.polyfit(x, y, 1)
+
+                # 1) 일반 horizon들 (1/3/10/30/60/120/300분)
                 for h_min, flag in horizon_flags.items():
                     if not flag:
                         continue
 
-                    # 1) 단순 추세 기반 예상가
+                    # 단순 추세 기반 예상가
                     p_trend = last_price + slope * h_min
 
-                    # 2) 해당 시간대에 가장 가까운 모델 horizon의 상승 확률
+                    # 모델 확률
                     p_up = get_nearest_model_prob(h_min)
 
                     if p_up is None:
-                        # 모델 확률 없으면 추세만 사용
                         preds[h_min] = p_trend
                     else:
-                        # 3) 확률 기반 "신뢰도" 가중치 (좀 더 공격적으로)
-                        #    p_up=0.5 여도 최소 base 만큼은 추세 반영
-                        base = 0.3  # 최소 추세 비중 (조절 가능)
+                        # 확률 기반 가중치 (조금 더 공격적으로)
+                        base = 0.3  # 최소 추세 비중
                         confidence = 2 * abs(p_up - 0.5)  # 0~1
                         w = base + (1 - base) * confidence
                         w = float(np.clip(w, 0.0, 1.0))
 
-                        # 4) 보정된 예상가: 현재가와 추세가 사이에서 가중합
                         p_adj = (1 - w) * last_price + w * p_trend
                         preds[h_min] = p_adj
-            # reg_window가 너무 작으면 preds는 비게 됨
+
+                # 2) 종가 예상
+                if show_close:
+                    # 미국장 기준: 정규장 9~16시 (실제로는 9:30~지만 여기선 단순화)
+                    hour = last_time.hour
+                    minute = last_time.minute
+                    if 9 <= hour < 16:
+                        # 오늘 16:00 기준으로 남은 분 수
+                        close_dt = last_time.replace(hour=16, minute=0, second=0, microsecond=0)
+                        minutes_to_close = int((close_dt - last_time).total_seconds() // 60)
+                        if minutes_to_close > 0:
+                            p_trend_close = last_price + slope * minutes_to_close
+                            p_up_close = get_nearest_model_prob(minutes_to_close)
+
+                            if p_up_close is None:
+                                pred_close = p_trend_close
+                            else:
+                                base = 0.3
+                                confidence = 2 * abs(p_up_close - 0.5)
+                                w = base + (1 - base) * confidence
+                                w = float(np.clip(w, 0.0, 1.0))
+                                pred_close = (1 - w) * last_price + w * p_trend_close
+                        else:
+                            pred_close = None
+                    else:
+                        pred_close = None  # 정규장 아닐 때는 종가 예상 안 함
+
+            # ===== 30분 전에 예상했던 현재가 (과거 예측 검증) ===== #
+            back_result = None  # dict 형태로 저장 예정
+
+            try:
+                t_now = intraday_df.index[-1]
+                t_back = t_now - pd.Timedelta(minutes=30)
+
+                # 1분봉 기준 30분 전까지의 구간에서 다시 추세선 추정
+                intraday_back = intraday_df[intraday_df.index <= t_back]
+                if len(intraday_back) >= 10:
+                    back_window = min(50, len(intraday_back))
+                    y_back = intraday_back["Close"].tail(back_window).values
+                    x_back = np.arange(back_window)
+                    slope_back, intercept_back = np.polyfit(x_back, y_back, 1)
+
+                    price_back = intraday_back["Close"].iloc[-1]
+
+                    # 그 시점에서 "30분 뒤" (지금) 가격에 대한 추세 기반 예상
+                    p_trend_back_30 = price_back + slope_back * 30
+
+                    # 같은 시점의 2분봉 모델 확률 복원
+                    df2 = model_df
+                    # 2분봉 인덱스에서 t_back 이전/같은 시점 중 가장 최근 것
+                    idx_candidates = df2.index[df2.index <= t_back]
+                    if len(idx_candidates) > 0:
+                        idx_back = idx_candidates[-1]
+                        past_row = df2.loc[idx_back]
+                        past_probs = predict_latest(models, past_row, feature_cols)
+
+                        # 30분에 가장 가까운 horizon 사용
+                        model_hs_back = list(past_probs.keys())
+                        nearest_h_back = min(model_hs_back, key=lambda H: abs(H - 30))
+                        p_up_back = past_probs[nearest_h_back]
+
+                        # 가중치 계산 (현재와 동일 로직)
+                        base = 0.3
+                        confidence = 2 * abs(p_up_back - 0.5)
+                        w_back = base + (1 - base) * confidence
+                        w_back = float(np.clip(w_back, 0.0, 1.0))
+
+                        p_adj_back_30 = (1 - w_back) * price_back + w_back * p_trend_back_30
+
+                        error = last_price - p_adj_back_30
+                        error_pct = error / last_price if last_price != 0 else np.nan
+
+                        back_result = {
+                            "pred": p_adj_back_30,
+                            "actual": last_price,
+                            "error": error,
+                            "error_pct": error_pct,
+                            "time_back": intraday_back.index[-1],
+                        }
+            except Exception:
+                back_result = None  # 에러 나면 걍 안 보여줌
 
             # 메인 레이아웃: 차트(좌) + 정보(우)
             chart_col, info_col = st.columns([4, 1])
@@ -411,13 +502,15 @@ with tab4:
                 shapes = []
                 annotations = []
 
-                # annotation의 x 위치를 가로로 분산 (0.05, 0.25, 0.45, 0.65, 0.85 ...)
+                # annotation의 x 위치를 가로로 분산
                 x_positions = {
                     1: 0.05,
-                    3: 0.25,
-                    10: 0.45,
-                    30: 0.65,
-                    60: 0.85,
+                    3: 0.20,
+                    10: 0.35,
+                    30: 0.50,
+                    60: 0.65,
+                    120: 0.80,
+                    300: 0.95,
                 }
                 colors = {
                     1: "blue",
@@ -425,13 +518,14 @@ with tab4:
                     10: "green",
                     30: "purple",
                     60: "red",
+                    120: "brown",
+                    300: "darkcyan",
                 }
 
                 for h_min, price in preds.items():
                     if not np.isfinite(price):
                         continue
 
-                    # 수평선
                     shapes.append(
                         dict(
                             type="line",
@@ -445,18 +539,44 @@ with tab4:
                         )
                     )
 
-                    # 텍스트 위치 (가로 분산)
                     x_anno = x_positions.get(h_min, 0.5)
                     annotations.append(
                         dict(
                             xref="paper",
                             x=x_anno,
                             y=price,
-                            xanchor="left",
+                            xanchor="center",
                             yanchor="bottom",
-                            text=f"+{h_min}분 예상",
+                            text=f"+{h_min}분",
                             showarrow=False,
                             font=dict(size=10, color=colors.get(h_min, "gray")),
+                        )
+                    )
+
+                # 종가 예상도 차트에 표시
+                if pred_close is not None and np.isfinite(pred_close):
+                    shapes.append(
+                        dict(
+                            type="line",
+                            xref="paper",
+                            x0=0,
+                            x1=1,
+                            yref="y",
+                            y0=pred_close,
+                            y1=pred_close,
+                            line=dict(color="black", width=1, dash="dash"),
+                        )
+                    )
+                    annotations.append(
+                        dict(
+                            xref="paper",
+                            x=0.5,
+                            y=pred_close,
+                            xanchor="center",
+                            yanchor="bottom",
+                            text="종가",
+                            showarrow=False,
+                            font=dict(size=10, color="black"),
                         )
                     )
 
@@ -479,9 +599,25 @@ with tab4:
                 if preds:
                     for h_min in sorted(preds.keys()):
                         price = preds[h_min]
-                        st.metric(label=f"+{h_min}분 예상", value=f"{price:,.2f}")
+                        st.metric(label=f"+{h_min}분", value=f"{price:,.2f}")
                 else:
                     st.write("예상가: 계산 불가 (데이터 또는 모델 확률 부족)")
+
+                if pred_close is not None and np.isfinite(pred_close):
+                    st.metric(label="종가 예상", value=f"{pred_close:,.2f}")
+
+                st.markdown("#### ⏪ 30분 전 예측 vs 현재")
+                if back_result is not None:
+                    st.write(
+                        f"30분 전 시점: {back_result['time_back'].strftime('%H:%M')}"
+                    )
+                    st.write(f"그때 30분 뒤 예상가: {back_result['pred']:.2f}")
+                    st.write(f"현재 실제가: {back_result['actual']:.2f}")
+                    st.write(
+                        f"오차: {back_result['error']:+.2f} ({back_result['error_pct']*100:+.2f}%)"
+                    )
+                else:
+                    st.write("30분 전 예측값을 계산할 수 있는 데이터가 부족합니다.")
 
                 st.markdown("#### 🕒 시각")
                 st.write(last_time.strftime("%Y-%m-%d %H:%M:%S"))
@@ -496,7 +632,10 @@ with tab4:
                     st.caption("애프터장(After-hours) 추정")
 
                 st.markdown("---")
-                st.caption("※ 예상 가격은 최근 추세 + 2분봉 모델 상승 확률을 함께 반영한 단순 보정값입니다.")
+                st.caption(
+                    "※ 예상 가격은 최근 1분봉 추세 + 2분봉 모델 상승 확률을 함께 반영한 단순 보정값입니다.\n"
+                    "※ 30분 전 예측 비교는 '그때의 추세 + 그때의 모델 확률'로 복원한 값과 현재가의 차이를 보여줍니다."
+                )
 
             st.markdown("#### 🔎 최근 1분봉 원시 데이터 (마지막 5개 캔들)")
             st.dataframe(intraday_df.tail(5))
