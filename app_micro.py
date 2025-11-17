@@ -379,15 +379,16 @@ with tab4:
                         # 모델 확률 없으면 추세만 사용
                         preds[h_min] = p_trend
                     else:
-                        # 3) 확률 기반 "신뢰도" 가중치
-                        #    p_up=0.5 -> w=0 (현재가에 붙임),
-                        #    p_up=0 or 1 -> w=1 (추세를 100% 신뢰)
-                        w = 2 * abs(p_up - 0.5)
+                        # 3) 확률 기반 "신뢰도" 가중치 (좀 더 공격적으로)
+                        #    p_up=0.5 여도 최소 base 만큼은 추세 반영
+                        base = 0.3  # 최소 추세 비중 (조절 가능)
+                        confidence = 2 * abs(p_up - 0.5)  # 0~1
+                        w = base + (1 - base) * confidence
                         w = float(np.clip(w, 0.0, 1.0))
 
                         # 4) 보정된 예상가: 현재가와 추세가 사이에서 가중합
                         p_adj = (1 - w) * last_price + w * p_trend
-                        preds[h_min] = p_adj
+
             # reg_window가 너무 작으면 preds는 비게 됨
 
             # 메인 레이아웃: 차트(좌) + 정보(우)
