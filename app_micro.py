@@ -259,7 +259,7 @@ with tab3:
 
 # ==================== 4) 실시간 시그널 탭 (1분봉) ==================== #
 with tab4:
-    st.subheader("4️⃣ 실시간 시그널 (1분봉 / 현재가 / 캔들차트 + 예상 가격)")
+    st.subheader("4️⃣ 실시간 시그널 (1분봉 / 현재가 / 캔들차트 + 모델 보정 예상가)")
 
     models = st.session_state["models"]
     model_df = st.session_state["model_df"]
@@ -271,7 +271,7 @@ with tab4:
     else:
         # ----- 4-1. 예측 결과 (2분봉 최신 샘플 기준 / 테이블만) ----- #
         latest_row = model_df.iloc[-1]
-        probs = predict_latest(models, latest_row, feature_cols)
+        probs = predict_latest(models, latest_row, feature_cols)  # {model_horizon: p_up}
 
         st.markdown("### 🔮 현재(가장 최근 2분봉) 기준 예측 결과")
 
@@ -288,8 +288,8 @@ with tab4:
 
         st.markdown("---")
 
-        # ----- 4-2. 실시간 1분봉 차트 & 현재가 + 예상가 ----- #
-        st.markdown("### 🕯 1분봉 실시간 캔들 차트 + 현재가 + 예상 가격")
+        # ----- 4-2. 실시간 1분봉 차트 & 현재가 + 모델 보정 예상가 ----- #
+        st.markdown("### 🕯 1분봉 실시간 캔들 차트 + 현재가 + 모델 보정 예상 가격")
 
         # 상단: 새로고침 옵션 + 예상 시간 선택
         col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([1.2, 1.2, 2.6])
@@ -346,17 +346,48 @@ with tab4:
             last_price = df_plot["Close"].iloc[-1]
             last_time = df_plot.index[-1]
 
-            # ===== 최근 추세 기반 여러 시간대 예상 가격 ===== #
+            # ===== 최근 추세 기반 여러 시간대 예상 가격 + 모델 확률 보정 ===== #
             reg_window = min(50, len(df_plot))
             y = df_plot["Close"].tail(reg_window).values
             x = np.arange(reg_window)
 
-            preds = {}  # {horizon_min: price}
+            preds = {}  # {horizon_min: adjusted_price}
+
+            # 모델 horizon 리스트와 probs dict에서 쓸 키 준비
+            model_horizons = list(probs.keys())
+
+            def get_nearest_model_prob(target_min: int) -> float | None:
+                """사용자 horizon(분)을 가장 가까운 모델 horizon과 매칭해서 p_up 가져오기."""
+                if not model_horizons:
+                    return None
+                nearest_h = min(model_horizons, key=lambda H: abs(H - target_min))
+                return probs.get(nearest_h, None)
+
             if reg_window >= 2:
                 slope, intercept = np.polyfit(x, y, 1)
                 for h_min, flag in horizon_flags.items():
-                    if flag:
-                        preds[h_min] = last_price + slope * h_min
+                    if not flag:
+                        continue
+
+                    # 1) 단순 추세 기반 예상가
+                    p_trend = last_price + slope * h_min
+
+                    # 2) 해당 시간대에 가장 가까운 모델 horizon의 상승 확률
+                    p_up = get_nearest_model_prob(h_min)
+
+                    if p_up is None:
+                        # 모델 확률 없으면 추세만 사용
+                        preds[h_min] = p_trend
+                    else:
+                        # 3) 확률 기반 "신뢰도" 가중치
+                        #    p_up=0.5 -> w=0 (현재가에 붙임),
+                        #    p_up=0 or 1 -> w=1 (추세를 100% 신뢰)
+                        w = 2 * abs(p_up - 0.5)
+                        w = float(np.clip(w, 0.0, 1.0))
+
+                        # 4) 보정된 예상가: 현재가와 추세가 사이에서 가중합
+                        p_adj = (1 - w) * last_price + w * p_trend
+                        preds[h_min] = p_adj
             # reg_window가 너무 작으면 preds는 비게 됨
 
             # 메인 레이아웃: 차트(좌) + 정보(우)
@@ -444,14 +475,13 @@ with tab4:
                 st.markdown("#### 💰 현재가")
                 st.metric(label="Price", value=f"{last_price:,.2f}")
 
-                st.markdown("#### 🔮 예상가")
+                st.markdown("#### 🔮 모델 보정 예상가")
                 if preds:
-                    # horizon 순서대로 깔끔하게 출력
                     for h_min in sorted(preds.keys()):
                         price = preds[h_min]
                         st.metric(label=f"+{h_min}분 예상", value=f"{price:,.2f}")
                 else:
-                    st.write("예상가: 계산 불가 (데이터 부족)")
+                    st.write("예상가: 계산 불가 (데이터 또는 모델 확률 부족)")
 
                 st.markdown("#### 🕒 시각")
                 st.write(last_time.strftime("%Y-%m-%d %H:%M:%S"))
@@ -466,7 +496,7 @@ with tab4:
                     st.caption("애프터장(After-hours) 추정")
 
                 st.markdown("---")
-                st.caption("※ 예상 가격은 최근 추세(선형회귀) 기반 단순 추정값입니다.")
+                st.caption("※ 예상 가격은 최근 추세 + 2분봉 모델 상승 확률을 함께 반영한 단순 보정값입니다.")
 
             st.markdown("#### 🔎 최근 1분봉 원시 데이터 (마지막 5개 캔들)")
             st.dataframe(intraday_df.tail(5))
