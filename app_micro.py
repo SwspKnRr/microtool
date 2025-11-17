@@ -432,52 +432,52 @@ with tab4:
                         # ----- 🔴 예측 로그 저장 (5분 / 10분 / 1시간 / 6시간 / 1일) ----- #
 
                     if st.session_state["pred_log"] is None:
-                           st.session_state["pred_log"] = pd.DataFrame(
+                         st.session_state["pred_log"] = pd.DataFrame(
                                columns=["made_at", "horizon_min", "base_price", "pred_price", "eval_time"]
                          )
 
                     last_logged = st.session_state.get("last_logged_time", None)
 
-         # 같은 1분봉 캔들에 대해 중복 로그 안 남기도록: 새로운 캔들일 때만 기록
+                         # 같은 1분봉 캔들에 대해 중복 로그 안 남기도록: 새로운 캔들일 때만 기록
                     if (last_logged is None) or (last_time > last_logged):
                          log_horizons = [5, 10, 60, 360, 1440]  # 5분, 10분, 1시간, 6시간, 1일
 
                          new_rows = []
-                    for h_log in log_horizons:
+                         for h_log in log_horizons:
                      # 1) 단순 추세 기반 예상가
-                     p_trend_h = last_price + slope * h_log
+                             p_trend_h = last_price + slope * h_log
 
             # 2) 해당 시간에 가장 가까운 모델 horizon 확률
-                     p_up_h = get_nearest_model_prob(h_log)
+                             p_up_h = get_nearest_model_prob(h_log)
 
-                    if p_up_h is None:
-                     p_adj_h = p_trend_h
-                    else:
+                             if p_up_h is None:
+                                p_adj_h = p_trend_h
+                             else:
                 # 3) 현재 우리가 쓰는 보정 로직 그대로 사용
-                     base_w = 0.3
-                     confidence = 2 * abs(p_up_h - 0.5)  # 0~1
-                     w_h = base_w + (1 - base_w) * confidence
-                     w_h = float(np.clip(w_h, 0.0, 1.0))
-                     p_adj_h = (1 - w_h) * last_price + w_h * p_trend_h
+                                base_w = 0.3
+                                confidence = 2 * abs(p_up_h - 0.5)  # 0~1
+                                w_h = base_w + (1 - base_w) * confidence
+                                w_h = float(np.clip(w_h, 0.0, 1.0))
+                                p_adj_h = (1 - w_h) * last_price + w_h * p_trend_h
 
-                     eval_time = last_time + pd.Timedelta(minutes=h_log)
+                         eval_time = last_time + pd.Timedelta(minutes=h_log)
 
-                    new_rows.append(
-                    {
-                    "made_at": last_time,
-                    "horizon_min": h_log,
-                    "base_price": last_price,
-                    "pred_price": p_adj_h,
-                    "eval_time": eval_time,
-                    }
-                        )
+                         new_rows.append(
+                         {
+                         "made_at": last_time,
+                         "horizon_min": h_log,
+                         "base_price": last_price,
+                         "pred_price": p_adj_h,
+                         "eval_time": eval_time,
+                         }
+                         )
 
-        if new_rows:
-            st.session_state["pred_log"] = pd.concat(
-                [st.session_state["pred_log"], pd.DataFrame(new_rows)],
-                ignore_index=True,
-            )
-            st.session_state["last_logged_time"] = last_time
+                         if new_rows:
+                          st.session_state["pred_log"] = pd.concat(
+                           [st.session_state["pred_log"], pd.DataFrame(new_rows)],
+                         ignore_index=True,
+                         )
+                         st.session_state["last_logged_time"] = last_time
 
 
             # ===== 30분 전에 예상했던 현재가 (과거 예측 검증) ===== #
