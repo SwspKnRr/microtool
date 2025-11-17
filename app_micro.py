@@ -493,10 +493,10 @@ with tab4:
                             high=df_plot["High"],
                             low=df_plot["Low"],
                             close=df_plot["Close"],
-                            increasing_line_color="red",     # 상승
-                            increasing_fillcolor="red",
-                            decreasing_line_color="blue",    # 하락
-                            decreasing_fillcolor="blue",
+                            increasing_line_color="FF8A8A",     # 상승
+                            increasing_fillcolor="FF8A8A",
+                            decreasing_line_color="6EA6FF",    # 하락
+                            decreasing_fillcolor="6EA6FF",
                             name="1분봉",
                         )
                     ]
