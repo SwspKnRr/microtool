@@ -493,10 +493,24 @@ with tab4:
                             high=df_plot["High"],
                             low=df_plot["Low"],
                             close=df_plot["Close"],
+                            increasing_line_color="red",     # 상승
+                            increasing_fillcolor="red",
+                            decreasing_line_color="blue",    # 하락
+                            decreasing_fillcolor="blue",
                             name="1분봉",
                         )
                     ]
                 )
+
+                # 👇 이 아래에 추가
+                fig_c.update_layout(
+                    dragmode=False,
+                     xaxis=dict(fixedrange=True),
+                     yaxis=dict(fixedrange=True),
+                     modebar_remove=[
+                          "zoom",
+                     ]
+                    )
 
                 # 예측 가격 수평선 + annotation
                 shapes = []
