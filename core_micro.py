@@ -23,28 +23,43 @@ def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     return rsi
 
 
-# ---------- 1분봉 데이터 다운로드 ---------- #
-def fetch_1min_data(ticker: str, days: int = 30) -> pd.DataFrame:
+# ---------- 2분봉 데이터 다운로드 (최대 60일) ---------- #
+def fetch_2min_data(ticker: str, days: int = 60) -> pd.DataFrame:
     """
-    최근 days일간 1분봉 데이터 다운로드 (yfinance 사용)
+    최근 days일간 2분봉 데이터 다운로드 (yfinance 사용)
+    - interval="2m"
+    - prepost=True 로 프리/애프터 포함
+    - 주말(토/일) 제거
     """
+    if days > 60:
+        days = 60  # yfinance 2m 최대 60일 제한
+
     df = yf.download(
         ticker,
         period=f"{days}d",
-        interval="1m",
+        interval="2m",
         auto_adjust=True,
+        prepost=True,      # 프리장/애프터장 포함
         progress=False,
     )
 
-    # yfinance는 MultiIndex(티커 포함)로 올 때도 있으니 정리
+    if df is None or df.empty:
+        return df
+
+    # MultiIndex 정리 (티커 포함되어 올 수 있음)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = [c[0] for c in df.columns]
 
     df = df.rename(columns=str.title)  # open -> Open 등
 
-    # 인덱스를 DateTime으로 보장
-    df = df.tz_localize(None) if hasattr(df.index, "tz") else df
+    # 타임존 제거 (naive datetime으로)
+    if hasattr(df.index, "tz"):
+        df = df.tz_localize(None)
+
     df = df.sort_index()
+
+    # 주말 제거 (토:5, 일:6)
+    df = df[df.index.dayofweek < 5]
 
     return df
 
@@ -58,13 +73,13 @@ def build_feature_frame(
     df = df_raw.copy()
 
     # 기본 수익률
-    df["return_1m"] = df["Close"].pct_change()
+    df["return_2m"] = df["Close"].pct_change()
 
     # 단기 이동평균
     for w in sma_windows:
         df[f"sma_{w}"] = df["Close"].rolling(w).mean()
 
-    # 단기 모멘텀 (종가 차이)
+    # 단기 모멘텀
     df["mom_1"] = df["Close"].diff(1)
     df["mom_3"] = df["Close"].diff(3)
 
@@ -83,9 +98,8 @@ def build_feature_frame(
     df["hour"] = df.index.hour
     df["dayofweek"] = df.index.dayofweek
 
-    # 장 구분 (미국 ETF 기준, 한국이면 바꿔야 함)
-    #  - 정규장: 9:30~16:00 (뉴욕)
-    #  - 여기서는 그냥 시간만 대충 구분용으로 씀 (엄밀하게 하려면 TZ 변환 필요)
+    # 장 구분 (미국 기준 대략적인 구분)
+    # 프리장: 4~9시, 정규장: 9~16시, 애프터: 16~24 & 0~4
     df["is_regular"] = ((df["hour"] >= 9) & (df["hour"] < 16)).astype(int)
     df["is_premarket"] = ((df["hour"] >= 4) & (df["hour"] < 9)).astype(int)
     df["is_after"] = ((df["hour"] >= 16) | (df["hour"] < 4)).astype(int)
@@ -134,7 +148,6 @@ def get_feature_target_matrices(
     """
     df_model에서 피처 컬럼과 타깃(y_{h})를 분리
     """
-    # 타깃/미래수익/원시 OHLC 제외한 피처들만 사용
     exclude_prefixes = ("future_ret_", "y_")
     exclude_exact = {"Open", "High", "Low", "Close", "Adj Close", "Volume"}
 
@@ -166,7 +179,7 @@ def train_models(
     - 시간 순서를 고려해서 앞 70% train, 뒤 30% test
     """
     n = X.shape[0]
-    if n < 200:  # 대충 최소 샘플수
+    if n < 200:
         raise ValueError("데이터가 너무 적어서 모델 학습이 어렵습니다. (최소 200 샘플 권장)")
 
     split_idx = int(n * 0.7)
@@ -221,7 +234,6 @@ def predict_latest(
 
     probs: dict[int, float] = {}
     for h, clf in models.items():
-        # predict_proba[:, 1] -> 상승(1)일 확률
         p = float(clf.predict_proba(X_latest)[0, 1])
         probs[h] = p
 

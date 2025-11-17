@@ -5,9 +5,10 @@ import matplotlib.pyplot as plt
 import matplotlib
 import pandas as pd
 import streamlit as st
+import mplfinance as mpf
 
 from core_micro import (
-    fetch_1min_data,
+    fetch_2min_data,
     build_feature_frame,
     build_targets,
     get_feature_target_matrices,
@@ -15,18 +16,18 @@ from core_micro import (
     predict_latest,
 )
 
-# ---------- 한글 폰트 설정 (Windows 기준: 굴림) ---------- #
+# ---------- 한글 폰트 설정 (Windows 기준: 맑은 고딕) ---------- #
 matplotlib.rcParams["font.family"] = "Gulim"
 matplotlib.rcParams["axes.unicode_minus"] = False
 
 # ---------- 페이지 기본 설정 ---------- #
 st.set_page_config(
-    page_title="초단기 1분봉 방향성 예측 툴",
+    page_title="초단기 2분봉 방향성 예측 툴",
     layout="wide",
 )
 
-st.title("⚡ 1달 1분봉 기반 초단기 방향성 예측 웹앱")
-st.caption("최근 1개월 1분봉 데이터를 기반으로 5/10/30분 + 사용자 정의 X분 후 상승 확률 예측")
+st.title("⚡ 최근 60일 2분봉 기반 초단기 방향성 예측 웹앱")
+st.caption("최근 최대 60일 2분봉 데이터를 기반으로 5/10/30분 + 사용자 정의 X분 후 상승 확률 예측")
 
 
 # ---------- 세션 상태 초기화 ---------- #
@@ -56,7 +57,7 @@ with st.sidebar:
 
     ticker = st.text_input("티커 (예: SPY, QQQ, AAPL 등)", value="QQQ")
 
-    days = st.slider("최근 N일 (1~30일)", min_value=1, max_value=30, value=20, step=1)
+    days = st.slider("최근 N일 (1~60일)", min_value=1, max_value=60, value=40, step=1)
 
     st.markdown("---")
     st.subheader("⏱ 예측 타임프레임")
@@ -97,15 +98,15 @@ tab1, tab2, tab3, tab4 = st.tabs(
 
 # ==================== 1) 데이터 탭 ==================== #
 with tab1:
-    st.subheader("1️⃣ 1분봉 데이터 다운로드")
+    st.subheader("1️⃣ 2분봉 데이터 다운로드 (프리/데이/애프터 포함, 주말 제외)")
 
     col1, col2 = st.columns([1, 2])
 
     with col1:
-        if st.button("📥 1분봉 데이터 불러오기"):
+        if st.button("📥 2분봉 데이터 불러오기"):
             with st.spinner("데이터 다운로드 중..."):
                 try:
-                    df_raw = fetch_1min_data(ticker, days=days)
+                    df_raw = fetch_2min_data(ticker, days=days)
                 except Exception as e:
                     st.error(f"데이터 다운로드 중 오류 발생: {e}")
                 else:
@@ -113,7 +114,10 @@ with tab1:
                         st.warning("데이터를 가져오지 못했습니다. 티커/기간을 다시 확인하세요.")
                     else:
                         st.session_state["raw_df"] = df_raw
-                        st.success(f"{ticker} 최근 {days}일 1분봉 데이터 다운로드 완료!")
+                        st.success(
+                            f"{ticker} 최근 {days}일 2분봉 데이터 다운로드 완료! "
+                            "(프리/애프터 포함, 주말 제외)"
+                        )
 
     with col2:
         df_raw = st.session_state["raw_df"]
@@ -126,10 +130,10 @@ with tab1:
     if st.session_state["raw_df"] is not None:
         df_raw = st.session_state["raw_df"]
         st.markdown("---")
-        st.write("📊 종가 간단 차트")
+        st.write("📊 종가 간단 차트 (최근 500캔들)")
         fig, ax = plt.subplots(figsize=(10, 4))
-        ax.plot(df_raw["Close"].tail(500))  # 최근 500개 정도만
-        ax.set_title(f"{ticker} 1분봉 종가 (최근 500개)")
+        ax.plot(df_raw["Close"].tail(500))
+        ax.set_title(f"{ticker} 2분봉 종가 (최근 500캔들)")
         ax.set_xlabel("시간")
         ax.set_ylabel("가격")
         st.pyplot(fig)
@@ -141,9 +145,12 @@ with tab2:
 
     df_raw = st.session_state["raw_df"]
     if df_raw is None:
-        st.warning("먼저 1분봉 데이터를 다운로드 해주세요. (탭 1)")
+        st.warning("먼저 2분봉 데이터를 다운로드 해주세요. (탭 1)")
     else:
-        st.write(f"티커: **{ticker}**, 최근 **{days}일** 1분봉 기준으로 피처/타깃을 생성합니다.")
+        st.write(
+            f"티커: **{ticker}**, 최근 **{days}일** 2분봉 기준으로 "
+            f"피처/타깃을 생성합니다. (주말 제외)"
+        )
 
         if st.button("🧮 피처 & 타깃 만들기"):
             with st.spinner("피처/타깃 생성 중..."):
@@ -194,7 +201,14 @@ with tab2:
                     }
                 )
             dist_df = pd.DataFrame(rows).set_index("horizon_min")
-            st.dataframe(dist_df.style.format({"up_ratio": "{:.2%}", "down_ratio": "{:.2%}"}))
+            st.dataframe(
+                dist_df.style.format(
+                    {
+                        "up_ratio": "{:.2%}",
+                        "down_ratio": "{:.2%}",
+                    }
+                )
+            )
 
 
 # ==================== 3) 모델 학습 탭 ==================== #
@@ -242,7 +256,7 @@ with tab3:
 
 # ==================== 4) 실시간 시그널 탭 ==================== #
 with tab4:
-    st.subheader("4️⃣ 실시간 시그널 (가장 최근 시점 기준)")
+    st.subheader("4️⃣ 실시간 시그널 (가장 최근 캔들 기준)")
 
     models = st.session_state["models"]
     model_df = st.session_state["model_df"]
@@ -255,9 +269,9 @@ with tab4:
         latest_row = model_df.iloc[-1]
         probs = predict_latest(models, latest_row, feature_cols)
 
+        # ----- 4-1. 예측 확률 표/그래프 ----- #
         st.markdown("### 🔮 현재 시점 기준 예측 결과")
 
-        # 표로 출력
         rows = []
         for h in sorted(probs.keys()):
             rows.append(
@@ -269,20 +283,37 @@ with tab4:
         prob_df = pd.DataFrame(rows).set_index("horizon_min")
         st.dataframe(prob_df.style.format({"up_prob": "{:.2%}"}))
 
-        # 막대그래프
         fig, ax = plt.subplots(figsize=(6, 3))
         ax.bar(prob_df.index.astype(str), prob_df["up_prob"])
         ax.set_ylim(0, 1)
         ax.set_ylabel("상승 확률")
         ax.set_xlabel("예측 타임프레임 (분)")
-        ax.set_title("현재 캔들 기준 각 타임프레임 상승 확률")
+        ax.set_title("현재 2분봉 기준 각 타임프레임 상승 확률")
         st.pyplot(fig)
 
         st.markdown("---")
-        st.markdown("### 🕒 가장 최근 캔들 정보")
+
+        # ----- 4-2. 실시간 2분봉 캔들 차트 ----- #
+        st.markdown("### 🕯 최근 2분봉 캔들 차트")
 
         raw_df = st.session_state["raw_df"]
-        if raw_df is not None:
-            st.write(raw_df.tail(5))
+        if raw_df is not None and not raw_df.empty:
+            # 최근 N캔들만 표시 (예: 100개)
+            last_n = 100
+            df_plot = raw_df.tail(last_n).copy()
+            df_plot.index.name = "Date"
+
+            fig2, ax2 = plt.subplots(figsize=(10, 4))
+            mpf.plot(
+                df_plot,
+                type="candle",
+                ax=ax2,
+                style="classic",
+                show_nontrading=False,
+            )
+            st.pyplot(fig2)
+
+            st.markdown("#### 🔎 최근 원시 데이터 (마지막 5개 캔들)")
+            st.dataframe(raw_df.tail(5))
         else:
-            st.info("원시 데이터(raw_df)가 세션에 없습니다. 탭 1에서 다시 다운로드해 주세요.")
+            st.info("원시 데이터(raw_df)가 없습니다. 탭 1에서 다시 다운로드해 주세요.")
