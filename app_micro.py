@@ -32,7 +32,6 @@ st.set_page_config(
 st.title("⚡ 단타로 과자 먹자")
 st.caption("2분봉 60일로 학습하고, 1분봉 실시간 차트에서 시그널 + 예상 가격 확인")
 
-
 # ---------- 세션 상태 초기화 ---------- #
 def init_state():
     defaults = {
@@ -388,7 +387,7 @@ with tab4:
 
                         # 4) 보정된 예상가: 현재가와 추세가 사이에서 가중합
                         p_adj = (1 - w) * last_price + w * p_trend
-
+                        preds[h_min] = p_adj
             # reg_window가 너무 작으면 preds는 비게 됨
 
             # 메인 레이아웃: 차트(좌) + 정보(우)
