@@ -45,6 +45,8 @@ def init_state():
         "feature_cols": None,
         "models": None,
         "metrics": None,
+        "pred_log": None,          # 예측 로그 (DataFrame)
+        "last_logged_time": None,  # 마지막으로 로그 찍은 1분봉 시각
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -89,12 +91,13 @@ with st.sidebar:
 
 
 # ---------- 메인 탭 구성 ---------- #
-tab1, tab2, tab3, tab4 = st.tabs(
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
     [
         "1️⃣ 데이터 다운로드 (2분봉)",
         "2️⃣ 피처 & 타깃 생성",
         "3️⃣ 모델 학습",
         "4️⃣ 실시간 시그널 (1분봉)",
+        "5️⃣ 얼마나 정확했나?",
     ]
 )
 
@@ -426,6 +429,57 @@ with tab4:
                     else:
                         pred_close = None  # 정규장 아닐 때는 종가 예상 안 함
 
+                        # ----- 🔴 예측 로그 저장 (5분 / 10분 / 1시간 / 6시간 / 1일) ----- #
+
+                    if st.session_state["pred_log"] is None:
+                           st.session_state["pred_log"] = pd.DataFrame(
+                               columns=["made_at", "horizon_min", "base_price", "pred_price", "eval_time"]
+                         )
+
+                    last_logged = st.session_state.get("last_logged_time", None)
+
+         # 같은 1분봉 캔들에 대해 중복 로그 안 남기도록: 새로운 캔들일 때만 기록
+                    if (last_logged is None) or (last_time > last_logged):
+                         log_horizons = [5, 10, 60, 360, 1440]  # 5분, 10분, 1시간, 6시간, 1일
+
+                         new_rows = []
+                    for h_log in log_horizons:
+                     # 1) 단순 추세 기반 예상가
+                     p_trend_h = last_price + slope * h_log
+
+            # 2) 해당 시간에 가장 가까운 모델 horizon 확률
+                     p_up_h = get_nearest_model_prob(h_log)
+
+                    if p_up_h is None:
+                     p_adj_h = p_trend_h
+                    else:
+                # 3) 현재 우리가 쓰는 보정 로직 그대로 사용
+                     base_w = 0.3
+                     confidence = 2 * abs(p_up_h - 0.5)  # 0~1
+                     w_h = base_w + (1 - base_w) * confidence
+                     w_h = float(np.clip(w_h, 0.0, 1.0))
+                     p_adj_h = (1 - w_h) * last_price + w_h * p_trend_h
+
+                     eval_time = last_time + pd.Timedelta(minutes=h_log)
+
+                    new_rows.append(
+                    {
+                    "made_at": last_time,
+                    "horizon_min": h_log,
+                    "base_price": last_price,
+                    "pred_price": p_adj_h,
+                    "eval_time": eval_time,
+                    }
+                        )
+
+        if new_rows:
+            st.session_state["pred_log"] = pd.concat(
+                [st.session_state["pred_log"], pd.DataFrame(new_rows)],
+                ignore_index=True,
+            )
+            st.session_state["last_logged_time"] = last_time
+
+
             # ===== 30분 전에 예상했던 현재가 (과거 예측 검증) ===== #
             back_result = None  # dict 형태로 저장 예정
 
@@ -664,3 +718,166 @@ with tab4:
         if auto_refresh:
             time.sleep(5)
             st.rerun()
+
+# ==================== 5) 예측 정확도 탭 ==================== #
+with tab5:
+    st.subheader("5️⃣ 얼마나 정확했나? (예측 vs 실제 성능)")
+
+    pred_log = st.session_state.get("pred_log", None)
+
+    if pred_log is None or pred_log.empty:
+        st.info("아직 쌓인 예측 로그가 없습니다. 4번 탭에서 조금 돌려본 후 다시 확인해봐.")
+    else:
+        # 최신 로그만 복사해서 사용
+        log_df = pred_log.copy()
+
+        st.markdown("#### 🔎 현재까지 기록된 예측 로그 (최근 20개)")
+        st.dataframe(
+            log_df.sort_values("made_at", ascending=False)
+                  .head(20)
+                  .reset_index(drop=True)
+        )
+
+        st.markdown("---")
+        st.markdown("#### 📥 평가에 사용할 1분봉 데이터 가져오기")
+
+        days_for_eval = st.slider(
+            "평가용으로 불러올 최근 일수 (1~7일)",
+            min_value=1,
+            max_value=7,
+            value=3,
+            step=1,
+        )
+
+        with st.spinner("1분봉 데이터를 다시 불러와서 실제 가격을 확인 중..."):
+            try:
+                hist_df = fetch_1min_intraday(ticker, days=days_for_eval)
+            except Exception as e:
+                st.error(f"1분봉 평가 데이터 다운로드 중 오류 발생: {e}")
+                hist_df = None
+
+        if hist_df is None or hist_df.empty:
+            st.warning("평가용 1분봉 데이터를 가져오지 못했습니다.")
+        else:
+            # eval_time이 이미 지난 예측들만 평가 대상
+            now_max = hist_df.index.max()
+
+            eval_rows = []
+            for _, row in log_df.iterrows():
+                eval_time = row["eval_time"]
+                if pd.isna(eval_time) or eval_time > now_max:
+                    continue  # 아직 미래인 예측 → 평가 불가
+
+                # eval_time 시점의 실제 가격 (= eval_time 이전 가장 마지막 종가)
+                hist_slice = hist_df[hist_df.index <= eval_time]
+                if hist_slice.empty:
+                    continue
+
+                actual_price = hist_slice["Close"].iloc[-1]
+
+                pred_price = row["pred_price"]
+                base_price = row["base_price"]
+
+                error = actual_price - pred_price
+                error_pct = (
+                    (actual_price - pred_price) / pred_price
+                    if pred_price != 0
+                    else np.nan
+                )
+
+                # 방향성 정확도: (기준가 대비) 예측 방향 vs 실제 방향
+                dir_pred = np.sign(pred_price - base_price)
+                dir_actual = np.sign(actual_price - base_price)
+                correct = (dir_pred == dir_actual) and (dir_actual != 0)
+
+                eval_rows.append(
+                    {
+                        "made_at": row["made_at"],
+                        "horizon_min": int(row["horizon_min"]),
+                        "base_price": base_price,
+                        "pred_price": pred_price,
+                        "actual_price": actual_price,
+                        "eval_time": eval_time,
+                        "error": error,
+                        "error_pct": error_pct,
+                        "correct": correct,
+                    }
+                )
+
+            if not eval_rows:
+                st.info("아직 평가 가능한 예측(실제 가격이 나온 horizon)이 없습니다. 조금 더 시간이 지난 뒤 다시 확인해봐.")
+            else:
+                eval_df = pd.DataFrame(eval_rows)
+
+                st.markdown("#### 📊 Horizon별 성능 요약")
+
+                def mae(x):
+                    return np.mean(np.abs(x))
+
+                def mape(x):
+                    return np.mean(np.abs(x)) * 100
+
+                summary = (
+                    eval_df.groupby("horizon_min")
+                    .agg(
+                        n=("horizon_min", "size"),
+                        mae=("error", mae),
+                        mape=("error_pct", mape),
+                        acc=("correct", "mean"),
+                    )
+                    .reset_index()
+                )
+
+                summary["acc"] = summary["acc"] * 100  # %
+                st.dataframe(
+                    summary.style.format(
+                        {
+                            "mae": "{:.3f}",
+                            "mape": "{:.2f}%",
+                            "acc": "{:.2f}%",
+                            "n": "{:d}",
+                        }
+                    )
+                )
+
+                st.markdown("---")
+                st.markdown("#### 📈 예측 vs 실제 그래프 (Horizon 선택)")
+
+                horizon_list = sorted(eval_df["horizon_min"].unique())
+                h_sel = st.selectbox("어느 Horizon을 볼까?", horizon_list, index=0)
+
+                sub = (
+                    eval_df[eval_df["horizon_min"] == h_sel]
+                    .sort_values("eval_time")
+                    .tail(200)  # 너무 길어지지 않게 최근 200개까지만
+                )
+
+                if sub.empty:
+                    st.info(f"{h_sel}분 Horizon에 대해 평가 가능한 예측이 아직 없습니다.")
+                else:
+                    fig, ax = plt.subplots(figsize=(8, 3))
+                    ax.plot(
+                        sub["eval_time"],
+                        sub["pred_price"],
+                        label="예측가",
+                        linewidth=1.5,
+                    )
+                    ax.plot(
+                        sub["eval_time"],
+                        sub["actual_price"],
+                        label="실제가",
+                        linewidth=1.5,
+                    )
+                    ax.set_title(f"{h_sel}분 Horizon - 예측 vs 실제 (시간 경과)")
+                    ax.set_xlabel("eval_time")
+                    ax.set_ylabel("가격")
+                    ax.legend()
+                    ax.grid(True, alpha=0.3)
+                    fig.autofmt_xdate()
+
+                    st.pyplot(fig)
+
+                    st.caption(
+                        "※ 각 점은 '그 시점에 5/10/60/360/1440분 뒤를 예측했던 값'과, "
+                        "실제로 그 시점에 도달했을 때 가격을 비교한 것."
+                    )
