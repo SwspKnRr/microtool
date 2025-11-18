@@ -842,7 +842,7 @@ with tab5:
     def load_train_df():
         df = yf.download(
             ticker,
-            period="120d",
+            period="60d",
             interval="2m",
             prepost=True,
             progress=False
