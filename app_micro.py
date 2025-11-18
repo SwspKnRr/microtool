@@ -12,9 +12,6 @@ import streamlit as st
 import yfinance as yf
 from zoneinfo import ZoneInfo
 
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score
-
 from core_micro import (
     fetch_2min_data,
     fetch_1min_intraday,
@@ -25,7 +22,7 @@ from core_micro import (
     predict_latest,
 )
 
-# ---------- 한글 폰트 설정 (Windows 기준: 맑은 고딕) ---------- #
+# ---------- 한글 폰트 설정 (Windows 기준: 굴림) ---------- #
 matplotlib.rcParams["font.family"] = "Gulim"
 matplotlib.rcParams["axes.unicode_minus"] = False
 
@@ -70,8 +67,6 @@ def is_regular_session_kst(ts: pd.Timestamp, open_kst: dt.time, close_kst: dt.ti
     - 장이 밤에 열려서 새벽에 닫히므로, open_kst ~ 24:00, 00:00 ~ close_kst 두 구간을 하나로 본다.
     """
     t = ts.time()
-    # 예: open=22:30, close=05:00 이면
-    # 22:30~24:00, 00:00~05:00 모두 정규장
     if t >= open_kst or t < close_kst:
         return True
     return False
@@ -83,16 +78,13 @@ def minutes_to_close_kst(ts: pd.Timestamp, open_kst: dt.time, close_kst: dt.time
     정규장이 아니면 None 반환.
     """
     if ts.tz is None:
-        # 안전장치: KST로 가정
         ts = ts.tz_localize("Asia/Seoul")
 
     t = ts.time()
     if not is_regular_session_kst(ts, open_kst, close_kst):
         return None
 
-    # 폐장 시간은 항상 '다음날 새벽' 기준으로 계산
     if t >= open_kst:
-        # 예: 밤 23시 → 다음날 새벽 close_kst 시각이 폐장
         close_dt = ts.replace(
             hour=close_kst.hour,
             minute=close_kst.minute,
@@ -100,7 +92,6 @@ def minutes_to_close_kst(ts: pd.Timestamp, open_kst: dt.time, close_kst: dt.time
             microsecond=0,
         ) + dt.timedelta(days=1)
     else:
-        # 이미 0시~close_kst 사이(새벽)인 경우 → 같은 날 close_kst
         close_dt = ts.replace(
             hour=close_kst.hour,
             minute=close_kst.minute,
@@ -119,23 +110,61 @@ def get_session_label_kst(ts: pd.Timestamp, open_kst: dt.time, close_kst: dt.tim
     t = ts.time()
     if is_regular_session_kst(ts, open_kst, close_kst):
         return "정규장(Regular)"
-    # 정규장 이전이면 프리장, 이후면 애프터장으로 간단하게 처리
     if t < open_kst:
         return "프리장(Pre-market)"
     return "애프터장(After-hours)"
 
 
-# ---------- 페이지 기본 설정 ---------- #단타로 과자 먹자
+# ---------- 공통 엔진: 2분봉 → 피처/타깃 → 모델 학습 ---------- #
+
+def run_training_pipeline(
+    df_raw: pd.DataFrame,
+    base_horizons: list[int],
+    custom_h: int | None,
+    random_state: int,
+):
+    """
+    공통 엔진:
+    - build_feature_frame
+    - build_targets
+    - get_feature_target_matrices
+    - train_models
+    탭 4와 탭 5가 둘 다 이 함수만 사용하게 통일.
+    """
+    feat_df = build_feature_frame(df_raw)
+    model_df, horizons = build_targets(
+        feat_df,
+        base_horizons=base_horizons,
+        custom_horizon=int(custom_h) if custom_h else None,
+        threshold=0.0,
+    )
+    X, y_dict, feature_cols = get_feature_target_matrices(model_df, horizons)
+    models, metrics_df = train_models(X, y_dict, random_state=random_state)
+
+    return {
+        "feat_df": feat_df,
+        "model_df": model_df,
+        "horizons": horizons,
+        "X": X,
+        "y_dict": y_dict,
+        "feature_cols": feature_cols,
+        "models": models,
+        "metrics": metrics_df,
+    }
+
+
+# ---------- 페이지 기본 설정 ---------- #
 st.set_page_config(
-    page_title="최근 60일 2분봉 학습 / 실시간 1분봉 예측 웹앱",
+    page_title="단타 예측 웹앱 (2분봉 엔진 + 1분봉 실시간 / 하루 힌드캐스트)",
     layout="wide",
 )
 
 st.title("⚡ 단타로 과자 먹자")
-st.caption("2분봉 60일로 학습하고, 1분봉 실시간 차트에서 시그널 + 예상 가격 확인")
+st.caption("2분봉 엔진 하나로 실시간 1분봉 예측 + 하루 힌드캐스트까지 한 번에")
 
 
 # ---------- 세션 상태 초기화 ---------- #
+
 def init_state():
     defaults = {
         "raw_df": None,          # 2분봉 데이터 (KST)
@@ -160,7 +189,7 @@ init_state()
 
 # ---------- 사이드바 설정 ---------- #
 with st.sidebar:
-    st.header("⚙ 설정")
+    st.header("⚙ 공통 설정 (엔진)")
 
     ticker = st.text_input("티커 (예: QQQ, SPY, AAPL 등)", value="QQQ")
 
@@ -176,7 +205,7 @@ with st.sidebar:
     )
 
     custom_h = st.number_input(
-        "사용자 정의 X분 (1~60분)",
+        "사용자 정의 X분 (1~60분, 선택 사항)",
         min_value=1,
         max_value=60,
         value=15,
@@ -196,167 +225,54 @@ with st.sidebar:
     )
 
     st.markdown("---")
-    st.caption("① 2분봉 데이터 다운로드 → ② 피처/타깃 생성 → ③ 모델 학습 → ④ 1분봉 실시간 시그널 → ⑤ 예측 정확도 확인")
+    st.caption("① 2분봉 데이터 다운로드 → ② 피처/타깃 생성 → ③ 모델 학습 → ④ 실시간 1분봉 시그널 → ⑤ 하루 힌드캐스트 평가")
 
 
-# ---------- 메인 탭 구성 ---------- #
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
+# ---------- 탭 구성: 실시간 / 힌드캐스트 ---------- #
+tab_live, tab_backtest = st.tabs(
     [
-        "1️⃣ 데이터 다운로드 (2분봉)",
-        "2️⃣ 피처 & 타깃 생성",
-        "3️⃣ 모델 학습",
-        "4️⃣ 실시간 시그널 (1분봉)",
-        "5️⃣ 얼마나 정확했나?",
+        "1️⃣ 실시간 시그널 (1분봉)",
+        "2️⃣ 하루 힌드캐스트 테스트",
     ]
 )
 
 
-# ==================== 1) 데이터 탭 ==================== #
-with tab1:
-    st.subheader("1️⃣ 2분봉 데이터 다운로드 (프리/데이/애프터 포함, KST 변환)")
+# ==================== 1) 실시간 시그널 탭 ==================== #
+with tab_live:
+    st.subheader("🚀 원클릭 파이프라인 + 실시간 시그널 (1분봉 / KST)")
 
-    col1, col2 = st.columns([1, 2])
-
-    with col1:
-        if st.button("📥 2분봉 데이터 불러오기"):
-            with st.spinner("데이터 다운로드 중..."):
+    # ---- 1-1. 원클릭 파이프라인 실행 버튼 ---- #
+    with st.expander("엔진 준비 (2분봉 다운로드 + 피처/타깃 + 모델 학습)", expanded=True):
+        if st.button("🚀 2분봉 다운로드 + 피처/타깃 생성 + 모델 학습 (원클릭)"):
+            with st.spinner("2분봉 다운로드 및 모델 학습 중..."):
                 try:
                     df_raw = fetch_2min_data(ticker, days=days)
                     if df_raw is None or df_raw.empty:
-                        raise ValueError("받아온 데이터가 비어 있습니다.")
+                        raise ValueError("받아온 2분봉 데이터가 비어 있습니다.")
                     df_raw = to_kst(df_raw)
+
+                    engine_out = run_training_pipeline(
+                        df_raw=df_raw,
+                        base_horizons=base_horizons,
+                        custom_h=int(custom_h) if custom_h else None,
+                        random_state=int(random_state),
+                    )
                 except Exception as e:
-                    st.error(f"데이터 다운로드/변환 중 오류 발생: {e}")
+                    st.error(f"엔진 준비 중 오류 발생: {e}")
                 else:
                     st.session_state["raw_df"] = df_raw
+                    for k in ["feat_df", "model_df", "horizons",
+                              "X", "y_dict", "feature_cols",
+                              "models", "metrics"]:
+                        st.session_state[k] = engine_out[k]
                     st.success(
-                        f"{ticker} 최근 {days}일 2분봉 데이터 다운로드 완료! (KST 변환, 주말 제외)"
+                        f"엔진 준비 완료! ({ticker}, 최근 {days}일 2분봉, "
+                        f"예측 horizon: {engine_out['horizons']})"
                     )
-
-    with col2:
-        df_raw = st.session_state["raw_df"]
-        if df_raw is not None:
-            st.write("🔹 데이터 샘플 (최근 10개, 인덱스=KST)")
-            st.dataframe(df_raw.tail(10))
-        else:
-            st.info("좌측에서 데이터를 먼저 다운로드하세요.")
-
-    if st.session_state["raw_df"] is not None:
-        df_raw = st.session_state["raw_df"]
-        st.markdown("---")
-        st.write("📊 종가 간단 라인 차트 (최근 500캔들, KST)")
-        fig, ax = plt.subplots(figsize=(10, 4))
-        ax.plot(df_raw["Close"].tail(500))
-        ax.set_title(f"{ticker} 2분봉 종가 (최근 500캔들, KST)")
-        ax.set_xlabel("시간 (KST)")
-        ax.set_ylabel("가격")
-        st.pyplot(fig)
-
-
-# ==================== 2) 피처 & 타깃 생성 탭 ==================== #
-with tab2:
-    st.subheader("2️⃣ 피처 & 타깃 생성 (2분봉 기반, KST 인덱스)")
-
-    df_raw = st.session_state["raw_df"]
-    if df_raw is None:
-        st.warning("먼저 2분봉 데이터를 다운로드 해주세요. (탭 1)")
-    else:
-        st.write(
-            f"티커: **{ticker}**, 최근 **{days}일** 2분봉(KST) 기준으로 "
-            f"피처/타깃을 생성합니다."
-        )
-
-        if st.button("🧮 피처 & 타깃 만들기"):
-            with st.spinner("피처/타깃 생성 중..."):
-                try:
-                    feat_df = build_feature_frame(df_raw)
-                    model_df, horizons = build_targets(
-                        feat_df,
-                        base_horizons=base_horizons,
-                        custom_horizon=int(custom_h) if custom_h else None,
-                        threshold=0.0,
-                    )
-                    X, y_dict, feature_cols = get_feature_target_matrices(
-                        model_df, horizons
-                    )
-                except Exception as e:
-                    st.error(f"피처/타깃 생성 중 오류 발생: {e}")
-                else:
-                    st.session_state["feat_df"] = feat_df
-                    st.session_state["model_df"] = model_df
-                    st.session_state["horizons"] = horizons
-                    st.session_state["X"] = X
-                    st.session_state["y_dict"] = y_dict
-                    st.session_state["feature_cols"] = feature_cols
-
-                    st.success(
-                        f"피처/타깃 생성 완료! 사용되는 샘플 수: {model_df.shape[0]:,}개, "
-                        f"예측 타임프레임: {horizons}분"
-                    )
-
-        model_df = st.session_state["model_df"]
-        horizons = st.session_state["horizons"]
-
-        if model_df is not None and horizons is not None:
-            st.markdown("### 🔍 피처/타깃 데이터 샘플 (최근 10개)")
-            st.dataframe(model_df.tail(10))
-
-            st.markdown("### 📈 타깃 분포 (상승/하락 비율)")
-            rows = []
-            for h in horizons:
-                y = model_df[f"y_{h}"]
-                up_ratio = (y == 1).mean()
-                rows.append(
-                    {
-                        "horizon_min": h,
-                        "samples": int(len(y)),
-                        "up_ratio": up_ratio,
-                        "down_ratio": 1 - up_ratio,
-                    }
-                )
-            dist_df = pd.DataFrame(rows).set_index("horizon_min")
-            st.dataframe(
-                dist_df.style.format(
-                    {
-                        "up_ratio": "{:.2%}",
-                        "down_ratio": "{:.2%}",
-                    }
-                )
-            )
-
-
-# ==================== 3) 모델 학습 탭 ==================== #
-with tab3:
-    st.subheader("3️⃣ 모델 학습 (2분봉 피처 기반, RandomForest)")
-
-    X = st.session_state["X"]
-    y_dict = st.session_state["y_dict"]
-    horizons = st.session_state["horizons"]
-
-    if X is None or y_dict is None or horizons is None:
-        st.warning("먼저 피처/타깃을 생성해 주세요. (탭 2)")
-    else:
-        st.write(
-            f"총 샘플 수: **{X.shape[0]:,}** 개, "
-            f"예측 타임프레임: **{horizons} 분**"
-        )
-
-        if st.button("🤖 RandomForest로 모델 학습하기"):
-            with st.spinner("모델 학습 중..."):
-                try:
-                    models, metrics_df = train_models(
-                        X, y_dict, random_state=random_state
-                    )
-                except Exception as e:
-                    st.error(f"모델 학습 중 오류 발생: {e}")
-                else:
-                    st.session_state["models"] = models
-                    st.session_state["metrics"] = metrics_df
-                    st.success("모델 학습 완료!")
 
         metrics_df = st.session_state["metrics"]
         if metrics_df is not None:
-            st.markdown("### 📊 성능 지표 (테스트 구간)")
+            st.markdown("### 📊 엔진 성능 지표 (최근 30% 구간 테스트)")
             st.dataframe(
                 metrics_df.style.format(
                     {
@@ -364,23 +280,22 @@ with tab3:
                         "precision": "{:.3f}",
                         "recall": "{:.3f}",
                     }
-                )
+                ),
+                use_container_width=True,
             )
 
+    st.markdown("---")
 
-# ==================== 4) 실시간 시그널 탭 (1분봉, KST) ==================== #
-with tab4:
-    st.subheader("4️⃣ 실시간 시그널 (1분봉 / KST 기준 / 모델 보정 예상가 + 30분 전 예측 리뷰)")
-
+    # ---- 1-2. 실시간 시그널 엔진 준비 여부 체크 ---- #
     models = st.session_state["models"]
     model_df = st.session_state["model_df"]
     feature_cols = st.session_state["feature_cols"]
-    horizons = st.session_state["horizons"]
+    horizons_engine = st.session_state["horizons"]
 
-    if models is None or model_df is None or feature_cols is None or horizons is None:
-        st.warning("먼저 2분봉 기반 모델을 학습해 주세요. (탭 3)")
+    if models is None or model_df is None or feature_cols is None or horizons_engine is None:
+        st.warning("먼저 위에서 🚀 원클릭 버튼으로 엔진을 한 번 학습시켜 주세요.")
     else:
-        # ----- 4-1. 예측 결과 (2분봉 최신 샘플 기준 / 테이블만) ----- #
+        # ----- 최신 2분봉 기준 예측 결과 (테이블) ----- #
         latest_row = model_df.iloc[-1]
         probs = predict_latest(models, latest_row, feature_cols)  # {model_horizon: p_up}
 
@@ -399,10 +314,9 @@ with tab4:
 
         st.markdown("---")
 
-        # ----- 4-2. 실시간 1분봉 차트 & 현재가 + 모델 보정 예상가 ----- #
+        # ----- 1-3. 실시간 1분봉 차트 & 현재가 + 모델 보정 예상가 ----- #
         st.markdown("### 🕯 1분봉 실시간 캔들 차트 (KST) + 현재가 + 모델 보정 예상 가격")
 
-        # 상단: 새로고침 옵션 + 캔들 수
         col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([1.2, 1.2, 2.6])
         with col_ctrl1:
             auto_refresh = st.checkbox("자동 새로고침 (5초)", value=False)
@@ -417,7 +331,6 @@ with tab4:
                 step=10,
             )
 
-        # 예상 시간 체크박스들
         st.markdown("#### ⏱ 예상 가격 표시 옵션")
         col_pred1, col_pred2, col_pred3, col_pred4, col_pred5 = st.columns(5)
         with col_pred1:
@@ -449,7 +362,6 @@ with tab4:
             300: show_300,
         }
 
-        # 수동 새로고침 버튼 → 즉시 rerun
         if refresh_now:
             st.rerun()
 
@@ -479,7 +391,6 @@ with tab4:
             preds: dict[int, float] = {}  # {horizon_min: adjusted_price}
             pred_close = None  # 종가 예상 (있으면 float)
 
-            # 모델 horizon 리스트와 probs dict에서 쓸 키 준비
             model_horizons = list(probs.keys())
 
             def get_nearest_model_prob(target_min: int) -> float | None:
@@ -497,16 +408,12 @@ with tab4:
                     if not flag:
                         continue
 
-                    # 단순 추세 기반 예상가
                     p_trend = last_price + slope * h_min
-
-                    # 모델 확률
                     p_up = get_nearest_model_prob(h_min)
 
                     if p_up is None:
                         preds[h_min] = p_trend
                     else:
-                        # 확률 기반 가중치 (조금 더 공격적으로)
                         base_w = 0.3  # 최소 추세 비중
                         confidence = 2 * abs(p_up - 0.5)  # 0~1
                         w = base_w + (1 - base_w) * confidence
@@ -541,16 +448,12 @@ with tab4:
 
                 last_logged = st.session_state.get("last_logged_time", None)
 
-                # 같은 1분봉 캔들에 대해 중복 로그 안 남기도록: 새로운 캔들일 때만 기록
                 if (last_logged is None) or (last_time > last_logged):
-                    log_horizons = [5, 10, 60, 360, 1440]  # 5분, 10분, 1시간, 6시간, 1일
+                    log_horizons = [5, 10, 60, 360, 1440]
 
                     new_rows = []
                     for h_log in log_horizons:
-                        # 1) 단순 추세 기반 예상가
                         p_trend_h = last_price + slope * h_log
-
-                        # 2) 해당 시간에 가장 가까운 모델 horizon 확률
                         p_up_h = get_nearest_model_prob(h_log)
 
                         if p_up_h is None:
@@ -596,10 +499,8 @@ with tab4:
 
                     price_back = intraday_back["Close"].iloc[-1]
 
-                    # 그 시점에서 "30분 뒤" (지금) 가격에 대한 추세 기반 예상
                     p_trend_back_30 = price_back + slope_back * 30
 
-                    # 같은 시점의 2분봉 모델 확률 복원
                     df2 = model_df
                     idx_candidates = df2.index[df2.index <= t_back]
                     if len(idx_candidates) > 0:
@@ -644,11 +545,11 @@ with tab4:
                             low=df_plot["Low"],
                             close=df_plot["Close"],
                             increasing=dict(
-                                line=dict(color="#FF8A8A"),   # 파스텔 레드
+                                line=dict(color="#FF8A8A"),
                                 fillcolor="#FF8A8A",
                             ),
                             decreasing=dict(
-                                line=dict(color="#6EA6FF"),   # 파스텔 블루
+                                line=dict(color="#6EA6FF"),
                                 fillcolor="#6EA6FF",
                             ),
                             name="1분봉",
@@ -656,13 +557,12 @@ with tab4:
                     ]
                 )
 
-                # 드래그 줌 없애고, Zoom in/out 버튼은 유지
                 fig_c.update_layout(
                     dragmode=False,
                     xaxis=dict(fixedrange=True),
                     yaxis=dict(fixedrange=True),
                     modebar_remove=[
-                        "zoom",       # drag zoom
+                        "zoom",
                         "select",
                         "lasso2d",
                         "pan",
@@ -670,11 +570,9 @@ with tab4:
                     ],
                 )
 
-                # 예측 가격 수평선 + annotation
                 shapes = []
                 annotations = []
 
-                # annotation의 x 위치를 가로로 분산
                 x_positions = {
                     1: 0.05,
                     3: 0.20,
@@ -725,7 +623,6 @@ with tab4:
                         )
                     )
 
-                # 종가 예상도 차트에 표시
                 if pred_close is not None and np.isfinite(pred_close):
                     shapes.append(
                         dict(
@@ -809,30 +706,30 @@ with tab4:
         else:
             st.info("1분봉 데이터를 가져오지 못했습니다. 티커/시간대를 다시 확인해 주세요.")
 
-        # 자동 새로고침 로직 (간단한 5초 주기)
         if auto_refresh:
             time.sleep(5)
             st.rerun()
 
 
-# ============================
-# 📊 5번 탭: 하루 힌드캐스트 테스트
-#      (n분 뒤 예측 차트 vs 실제 차트 + 오차 + 해석)
-# ============================
+# ==================== 2) 하루 힌드캐스트 탭 ==================== #
+with tab_backtest:
+    st.header("📅 하루 힌드캐스트 테스트 (같은 2분봉 엔진으로 과거 하루 평가)")
 
-with tab5:
-    st.header("📅 하루 힌드캐스트 테스트 (예측 vs 실제)")
+    # 0) 엔진에 쓸 2분봉 원본이 준비됐는지 확인
+    df_raw_global = st.session_state["raw_df"]
+    if df_raw_global is None or df_raw_global.empty:
+        st.warning("먼저 실시간 탭에서 🚀 원클릭 버튼으로 2분봉 데이터를 한 번 받아주세요.")
+        st.stop()
 
-    # --------------------------------------------------------
-    # 0) 며칠 전 하루를 평가할지
-    # --------------------------------------------------------
+    # 1) 며칠 전 하루를 평가할지
     eval_offset_days = st.slider("며칠 전 하루를 평가할까요?", 1, 7, 6)
-    st.info(f"{eval_offset_days}일 전 데이터를 가지고, "
-            f"그날 장을 하루 종일 예측했다고 가정하고 성능을 평가합니다.")
+    st.info(
+        f"{eval_offset_days}일 전 하루(평가일)를 대상으로, "
+        f"그 전날까지의 2분봉으로 엔진을 학습시키고, "
+        f"그날 장을 하루 종일 예측했다고 가정해서 성능을 평가합니다."
+    )
 
-    # --------------------------------------------------------
-    # 1) 날짜 계산 (KST 기준)
-    # --------------------------------------------------------
+    # 2) 날짜 계산 (KST 기준)
     now = dt.datetime.now(dt.timezone.utc).astimezone(ZoneInfo("Asia/Seoul"))
     eval_date = now.date() - dt.timedelta(days=eval_offset_days)          # 평가일
     train_end_date = now.date() - dt.timedelta(days=eval_offset_days + 1) # 훈련 종료일(전날까지)
@@ -840,198 +737,139 @@ with tab5:
     st.write(f"📌 **훈련 종료일:** {train_end_date}")
     st.write(f"📌 **평가일:** {eval_date}")
 
-    # --------------------------------------------------------
-    # 2) tab5 전용 피처 / 타깃 함수
-    # --------------------------------------------------------
-    def make_features_tab5(df: pd.DataFrame) -> pd.DataFrame:
-        """2분봉 데이터에서 간단한 피처 생성 (tab5 전용)"""
-        if df is None or df.empty:
-            return pd.DataFrame()
-
-        close_raw = df["Close"]
-        if isinstance(close_raw, pd.DataFrame):
-            close_raw = close_raw.iloc[:, 0]
-        close = pd.to_numeric(close_raw, errors="coerce")
-
-        if "Volume" in df.columns:
-            vol_raw = df["Volume"]
-            if isinstance(vol_raw, pd.DataFrame):
-                vol_raw = vol_raw.iloc[:, 0]
-        else:
-            vol_raw = pd.Series(index=df.index, data=np.nan)
-        vol = pd.to_numeric(vol_raw, errors="coerce")
-
-        X = pd.DataFrame(index=df.index)
-        X["ret1"] = close.pct_change()
-        X["ma5"] = close.rolling(5).mean()
-        X["ma20"] = close.rolling(20).mean()
-        X["trend"] = close.diff()
-        X["vol"] = vol
-
-        return X.dropna()
-
-    def make_target_tab5(df: pd.DataFrame, horizon: int) -> pd.Series:
-        """h분 뒤 종가가 현재보다 높은지(1)/아닌지(0)"""
-        close_raw = df["Close"]
-        if isinstance(close_raw, pd.DataFrame):
-            close_raw = close_raw.iloc[:, 0]
-        close = pd.to_numeric(close_raw, errors="coerce")
-        return (close.shift(-horizon) > close).astype(int)
-
-    # --------------------------------------------------------
-    # 3) 훈련 데이터 로딩 (최근 60일 2분봉 → train_end_date까지)
-    # --------------------------------------------------------
-    def load_train_df():
-        df = fetch_2min_data(ticker, days=60)
-        if df is None or df.empty:
-            return df
-        df = to_kst(df)
-        df = df[df.index.date <= train_end_date]
-        return df.dropna()
-
-    train_df = load_train_df()
-    st.write(f"🔍 훈련용 캔들 수: {len(train_df) if train_df is not None else 0}")
+    # 3) 훈련용 데이터 (글로벌 2분봉 중에서 train_end_date 이전만 사용)
+    train_df = df_raw_global[df_raw_global.index.date <= train_end_date]
+    st.write(f"🔍 훈련용 캔들 수: {len(train_df)}")
 
     if train_df is None or train_df.empty or len(train_df) < 200:
-        st.error("훈련 데이터가 부족합니다. (최소 200캔들 필요)")
+        st.error("훈련 데이터가 부족합니다. (최소 200캔들 필요, days 슬라이더를 늘려보세요.)")
         st.stop()
 
-    X_train = make_features_tab5(train_df)
-    if X_train is None or X_train.empty or len(X_train) < 50:
-        st.error("훈련 데이터에서 유효한 피처를 만들지 못했습니다.")
+    # 4) 같은 엔진으로 다시 학습 (과거 cutoff까지)
+    st.subheader("🔧 엔진 학습 (훈련 종료일까지만 사용)")
+
+    try:
+        engine_bt = run_training_pipeline(
+            df_raw=train_df,
+            base_horizons=base_horizons,
+            custom_h=int(custom_h) if custom_h else None,
+            random_state=int(random_state),
+        )
+    except Exception as e:
+        st.error(f"과거 구간 엔진 학습 중 오류 발생: {e}")
         st.stop()
 
-    horizons = [5, 10, 30]  # 5분, 10분, 30분 뒤 예측
+    models_bt = engine_bt["models"]
+    feature_cols_bt = engine_bt["feature_cols"]
+    horizons_bt = engine_bt["horizons"]
+    metrics_bt = engine_bt["metrics"]
 
-    y_train_dict = {
-        h: make_target_tab5(train_df, h).loc[X_train.index]
-        for h in horizons
-    }
+    st.write(f"사용 horizon(분): {horizons_bt}")
 
-    # --------------------------------------------------------
-    # 4) 모델 학습 (RandomForest)
-    # --------------------------------------------------------
-    st.subheader("🔧 모델 학습 중...")
-
-    models = {}
-    for h in horizons:
-        rf = RandomForestClassifier(
-            n_estimators=200,
-            max_depth=6,
-            random_state=42,
+    if metrics_bt is not None:
+        st.markdown("### 📊 이 힌드캐스트에서 사용한 엔진 성능 (훈련 데이터 내 테스트)")
+        st.dataframe(
+            metrics_bt.style.format(
+                {"accuracy": "{:.3f}", "precision": "{:.3f}", "recall": "{:.3f}"}
+            ),
+            use_container_width=True,
         )
-        rf.fit(X_train, y_train_dict[h])
-        models[h] = rf
 
-    st.success("모델 학습 완료!")
-
-    # --------------------------------------------------------
-    # 5) 평가일 데이터 로딩 (2분봉)
-    # --------------------------------------------------------
-    def load_eval_day():
-        df = yf.download(
-            ticker,
-            start=eval_date,
-            end=eval_date + dt.timedelta(days=1),
-            interval="2m",
-            prepost=True,
-            progress=False,
-        )
-        if df is None or df.empty:
-            return df
-        df = to_kst(df)
-        df = df[df.index.date == eval_date]
-        return df.dropna()
-
-    eval_df = load_eval_day()
-    st.write(f"📈 평가일 캔들 수: {len(eval_df) if eval_df is not None else 0}")
+    # 5) 평가일 데이터 (df_raw_global 중 해당 날짜만)
+    eval_df = df_raw_global[df_raw_global.index.date == eval_date]
+    st.write(f"📈 평가일 캔들 수: {len(eval_df)}")
 
     if eval_df is None or eval_df.empty or len(eval_df) < 50:
         st.error("평가일 데이터가 너무 적습니다. (최소 50캔들 필요)")
         st.stop()
 
-    # --------------------------------------------------------
-    # 6) 하루 종일 예측 실행
-    # --------------------------------------------------------
+    # 6) 평가일 전체에 대해: h분 뒤 가격 예측 vs 실제
     st.subheader("🔮 하루 종일 예측 실행 중...")
 
-    results = []
+    # 6-1) 평가일 피처 (같은 엔진 피처 생성 함수 사용)
+    feat_eval_full = build_feature_frame(eval_df)
+    feat_eval_full = feat_eval_full.dropna()
 
-    # 평가일 Close를 1D 시리즈로 변환
+    if feat_eval_full is None or feat_eval_full.empty:
+        st.error("평가일 데이터에서 유효한 피처를 만들지 못했습니다.")
+        st.stop()
+
+    # 6-2) 평가용 공통 구조
     close_raw = eval_df["Close"]
     if isinstance(close_raw, pd.DataFrame):
         close_raw = close_raw.iloc[:, 0]
     close_series = pd.to_numeric(close_raw, errors="coerce")
 
-    for t_idx in range(20, len(eval_df)):
+    idx_positions = {ts: i for i, ts in enumerate(eval_df.index)}
 
-        # 시점 t까지의 데이터만 사용해서 피처 생성
-        hist = eval_df.iloc[:t_idx]
-        X_hist = make_features_tab5(hist)
-        if X_hist is None or X_hist.empty or len(X_hist) < 20:
+    results = []
+
+    for ts in feat_eval_full.index:
+        if ts not in idx_positions:
             continue
+        pos = idx_positions[ts]
 
-        cur_time = hist.index[-1]
-
-        # 현재가 (스칼라)
-        hist_close_raw = hist["Close"]
-        if isinstance(hist_close_raw, pd.DataFrame):
-            hist_close_raw = hist_close_raw.iloc[:, 0]
-        cur_close_val = pd.to_numeric(hist_close_raw.iloc[-1], errors="coerce")
-        if not np.isfinite(cur_close_val):
+        # 현재가
+        cur_val = close_series.iloc[pos]
+        if not np.isfinite(cur_val):
             continue
-        cur_close = float(cur_close_val)
+        cur_price = float(cur_val)
 
-        # 최근 추세(마지막 20캔들 기준)로 기울기 계산
-        hist_close_series = pd.to_numeric(hist_close_raw, errors="coerce")
-        window = min(20, len(hist_close_series))
+        # 최근 추세 (마지막 20캔들 기준)
+        window = min(20, pos + 1)
         if window < 5:
             continue
-        y_trend = hist_close_series.iloc[-window:].values
+        y_trend = close_series.iloc[pos - window + 1: pos + 1].values
         x_trend = np.arange(window)
-        slope, intercept = np.polyfit(x_trend, y_trend, 1)  # 1캔들당 변화량(2분당)
+        slope, intercept = np.polyfit(x_trend, y_trend, 1)
 
-        for h in horizons:
-            # 모델이 예측한 상승 확률
-            prob = models[h].predict_proba(X_hist.iloc[-1:].values)[0, 1]
+        # 피처 벡터
+        feat_row = feat_eval_full.loc[ts, feature_cols_bt]
+        if feat_row.isna().any():
+            continue
+        X_row = feat_row.values.reshape(1, -1)
+
+        # 각 horizon마다 예측
+        for h in horizons_bt:
+            # 모델 상승 확률
+            prob = models_bt[h].predict_proba(X_row)[0, 1]
 
             # 순수 추세 기반 예측 (2분봉이라 h/2 캔들 뒤)
             steps = h / 2.0
-            trend_price = cur_close + slope * steps
+            trend_price = cur_price + slope * steps
 
-            # 확률 기반 가중치 (확신이 높을수록 추세를 더 믿는다)
+            # 확률 기반 가중치
             confidence = 2 * abs(prob - 0.5)  # 0~1
             w = 0.3 + 0.7 * confidence       # 최소 0.3, 최대 1.0
-            pred_price = cur_close + (trend_price - cur_close) * w
+            pred_price = cur_price + (trend_price - cur_price) * w
 
             # 실제 h분 뒤 가격
-            if t_idx + int(steps) < len(eval_df):
-                actual_val = close_series.iloc[t_idx + int(steps)]
+            target_idx = pos + int(steps)
+            if target_idx < len(close_series):
+                actual_val = close_series.iloc[target_idx]
                 actual_price = float(actual_val) if np.isfinite(actual_val) else None
             else:
                 actual_price = None
 
             results.append(
                 {
-                    "time": cur_time,           # 예측을 만든 시점
-                    "horizon": h,              # 몇 분 뒤
-                    "pred_prob": float(prob),  # 상승 확률
-                    "current_price": cur_close,
-                    "pred_price": pred_price,  # 예측한 h분 뒤 가격
-                    "actual_price": actual_price,  # 실제 h분 뒤 가격
+                    "time": ts,
+                    "horizon": h,
+                    "pred_prob": float(prob),
+                    "current_price": cur_price,
+                    "pred_price": pred_price,
+                    "actual_price": actual_price,
                 }
             )
 
     res_df = pd.DataFrame(results)
     st.success("하루 전체 예측 완료!")
 
-    # --------------------------------------------------------
     # 7) horizon별 성능 요약 (정량 지표)
-    # --------------------------------------------------------
     st.subheader("📊 성능 요약")
 
     perf_rows = []
-    for h in horizons:
+    for h in horizons_bt:
         sub = res_df[res_df["horizon"] == h].copy()
         if sub.empty:
             continue
@@ -1048,7 +886,6 @@ with tab5:
         pred = pred[mask]
         cur = cur[mask]
 
-        # 방향 정확도: (실제 h분 뒤가 올랐는지) vs (예측이 오른다고 본지)
         actual_dir = (actual > cur).astype(int)
         pred_dir = (pred > cur).astype(int)
         dir_acc = (actual_dir == pred_dir).mean()
@@ -1077,12 +914,14 @@ with tab5:
     else:
         st.write("성능을 계산할 수 있는 유효한 샘플이 없습니다.")
 
-    # --------------------------------------------------------
     # 8) n분 뒤 예측 차트 vs 실제 차트 + 오차 그래프
-    # --------------------------------------------------------
     st.subheader("📉 예측 차트 vs 실제 차트")
 
-    h_sel = st.selectbox("어떤 horizon(몇 분 뒤)을 볼까요?", horizons)
+    if len(horizons_bt) == 0:
+        st.write("표시할 horizon이 없습니다.")
+        st.stop()
+
+    h_sel = st.selectbox("어떤 horizon(몇 분 뒤)을 볼까요?", sorted(horizons_bt))
 
     view = res_df[res_df["horizon"] == h_sel].copy()
     view["actual_num"] = pd.to_numeric(view["actual_price"], errors="coerce")
@@ -1093,7 +932,6 @@ with tab5:
     if view.empty:
         st.write("선택한 horizon에 대해 표시할 데이터가 없습니다.")
     else:
-        # 1) 위: 예측 vs 실제 가격
         fig_price = go.Figure()
         fig_price.add_trace(
             go.Scatter(
@@ -1121,7 +959,6 @@ with tab5:
         )
         st.plotly_chart(fig_price, use_container_width=True)
 
-        # 2) 아래: 오차 그래프 (실제 - 예측)
         err = view["actual_num"] - view["pred_num"]
         fig_err = go.Figure()
         fig_err.add_trace(
@@ -1142,34 +979,18 @@ with tab5:
         )
         st.plotly_chart(fig_err, use_container_width=True)
 
-        # ----------------------------------------------------
         # 9) 선택한 horizon에 대한 자동 해석
-        # ----------------------------------------------------
         st.markdown("### 🧠 해석")
 
-        # 위에서 계산한 perf_df에서 h_sel 행 찾아서 쓰기 (없으면 즉석 계산)
-        sel_perf = None
-        if perf_rows:
-            for row in perf_rows:
-                if row["horizon_min"] == h_sel:
-                    sel_perf = row
-                    break
-
-        if sel_perf is not None:
-            dir_acc = sel_perf["direction_acc"]
-            mae = sel_perf["MAE"]
-            mape = sel_perf["MAPE"]
-            samples = sel_perf["samples"]
-        else:
-            actual = view["actual_num"].to_numpy()
-            pred = view["pred_num"].to_numpy()
-            cur = view["cur_num"].to_numpy()
-            samples = len(actual)
-            actual_dir = (actual > cur).astype(int)
-            pred_dir = (pred > cur).astype(int)
-            dir_acc = (actual_dir == pred_dir).mean()
-            mae = np.mean(np.abs(actual - pred))
-            mape = np.mean(np.abs(actual - pred) / actual)
+        actual = view["actual_num"].to_numpy()
+        pred = view["pred_num"].to_numpy()
+        cur = view["cur_num"].to_numpy()
+        samples = len(actual)
+        actual_dir = (actual > cur).astype(int)
+        pred_dir = (pred > cur).astype(int)
+        dir_acc = (actual_dir == pred_dir).mean()
+        mae = np.mean(np.abs(actual - pred))
+        mape = np.mean(np.abs(actual - pred) / actual)
 
         st.write(f"- 샘플 수: **{samples}개**")
         st.write(f"- 방향 예측 정확도: **{dir_acc*100:.1f}%**")
@@ -1178,7 +999,6 @@ with tab5:
 
         st.markdown("---")
 
-        # 간단한 코멘트
         if dir_acc > 0.6:
             st.success("📈 방향은 꽤 잘 맞는 편입니다. 다른 필터(거래량, 지표)와 함께 쓰면 단타 시그널로 쓸 만한 수준입니다.")
         elif dir_acc > 0.52:
@@ -1190,5 +1010,3 @@ with tab5:
             st.success("🎯 가격 오차도 30% 미만이라, 대략적인 ‘가격 범위’ 감을 잡는 데는 쓸 수 있습니다.")
         else:
             st.warning("⚠ 가격 오차가 큰 편이라, 정확한 진입/청산 가격보다는 '방향' 중심으로만 참고하는 편이 낫습니다.")
-
-
