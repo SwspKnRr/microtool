@@ -115,6 +115,22 @@ def get_session_label_kst(ts: pd.Timestamp, open_kst: dt.time, close_kst: dt.tim
     return "애프터장(After-hours)"
 
 
+def get_session_mask_kst(times: pd.Series, open_kst: dt.time, close_kst: dt.time) -> list[str]:
+    """
+    시계열 인덱스(KST 기준)에 대해 각 시점의 세션 라벨 목록을 반환.
+    """
+    labels: list[str] = []
+    for ts in times:
+        t = ts.time()
+        if t >= open_kst or t < close_kst:
+            labels.append("regular")
+        elif t < open_kst:
+            labels.append("premarket")
+        else:
+            labels.append("after")
+    return labels
+
+
 # ---------- 공통 엔진: 2분봉 → 피처/타깃 → 모델 학습 ---------- #
 
 def run_training_pipeline(
@@ -167,7 +183,7 @@ st.caption("2분봉 엔진 하나로 실시간 1분봉 예측 + 하루 힌드캐
 
 def init_state():
     defaults = {
-        "raw_df": None,          # 2분봉 데이터 (KST)
+        "raw_df": None,          # 2분봉 데이터 (KST, tz-aware)
         "feat_df": None,
         "model_df": None,
         "horizons": None,
@@ -721,28 +737,42 @@ with tab_backtest:
         st.warning("먼저 실시간 탭에서 🚀 원클릭 버튼으로 2분봉 데이터를 한 번 받아주세요.")
         st.stop()
 
-    # 1) 며칠 전 하루를 평가할지
-    eval_offset_days = st.slider("며칠 전 하루를 평가할까요?", 1, 7, 6)
+    # 1) 며칠 전 '미국 기준 장 날짜'를 평가할지
+    eval_offset_days = st.slider("며칠 전 장(미국 기준)을 평가할까요?", 1, 7, 6)
     st.info(
-        f"{eval_offset_days}일 전 하루(평가일)를 대상으로, "
-        f"그 전날까지의 2분봉으로 엔진을 학습시키고, "
-        f"그날 장을 하루 종일 예측했다고 가정해서 성능을 평가합니다."
+        f"{eval_offset_days}일 전 미국 기준 장 날짜를 평가일로 잡고, "
+        f"그 전날까지의 2분봉으로 엔진을 학습시킨 뒤 "
+        f"그날 프리장~정규장~애프터장을 하루 종일 예측했다고 가정해 평가합니다."
     )
 
-    # 2) 날짜 계산 (KST 기준)
-    now = dt.datetime.now(dt.timezone.utc).astimezone(ZoneInfo("Asia/Seoul"))
-    eval_date = now.date() - dt.timedelta(days=eval_offset_days)          # 평가일
-    train_end_date = now.date() - dt.timedelta(days=eval_offset_days + 1) # 훈련 종료일(전날까지)
+    # 2) 날짜 계산 (UTC → US/Eastern 기준 장 날짜)
+    now_utc = dt.datetime.now(dt.timezone.utc)
+    now_et = now_utc.astimezone(ZoneInfo("America/New_York"))
 
-    st.write(f"📌 **훈련 종료일:** {train_end_date}")
-    st.write(f"📌 **평가일:** {eval_date}")
+    eval_us_date = now_et.date() - dt.timedelta(days=eval_offset_days)       # 평가할 미국 장 날짜
+    train_end_us_date = eval_us_date - dt.timedelta(days=1)                  # 그 전날까지로 학습
 
-    # 3) 훈련용 데이터 (글로벌 2분봉 중에서 train_end_date 이전만 사용)
-    train_df = df_raw_global[df_raw_global.index.date <= train_end_date]
+    st.write(f"📌 **훈련 종료일(미국 기준):** {train_end_us_date}")
+    st.write(f"📌 **평가일(미국 기준):** {eval_us_date}")
+
+    # 3) KST 인덱스를 US/Eastern으로 변환해서 날짜 마스크 생성
+    idx_et = df_raw_global.index.tz_convert("America/New_York")
+
+    train_mask = idx_et.date <= train_end_us_date
+    eval_mask = idx_et.date == eval_us_date
+
+    train_df = df_raw_global[train_mask]
+    eval_df = df_raw_global[eval_mask]
+
     st.write(f"🔍 훈련용 캔들 수: {len(train_df)}")
+    st.write(f"📈 평가일 캔들 수: {len(eval_df)}")
 
     if train_df is None or train_df.empty or len(train_df) < 200:
         st.error("훈련 데이터가 부족합니다. (최소 200캔들 필요, days 슬라이더를 늘려보세요.)")
+        st.stop()
+
+    if eval_df is None or eval_df.empty or len(eval_df) < 50:
+        st.error("평가일 데이터가 너무 적습니다. (최소 50캔들 필요)")
         st.stop()
 
     # 4) 같은 엔진으로 다시 학습 (과거 cutoff까지)
@@ -775,18 +805,10 @@ with tab_backtest:
             use_container_width=True,
         )
 
-    # 5) 평가일 데이터 (df_raw_global 중 해당 날짜만)
-    eval_df = df_raw_global[df_raw_global.index.date == eval_date]
-    st.write(f"📈 평가일 캔들 수: {len(eval_df)}")
-
-    if eval_df is None or eval_df.empty or len(eval_df) < 50:
-        st.error("평가일 데이터가 너무 적습니다. (최소 50캔들 필요)")
-        st.stop()
-
-    # 6) 평가일 전체에 대해: h분 뒤 가격 예측 vs 실제
+    # 5) 평가일 전체에 대해: h분 뒤 가격 예측 vs 실제
     st.subheader("🔮 하루 종일 예측 실행 중...")
 
-    # 6-1) 평가일 피처 (같은 엔진 피처 생성 함수 사용)
+    # 5-1) 평가일 피처 (같은 엔진 피처 생성 함수 사용)
     feat_eval_full = build_feature_frame(eval_df)
     feat_eval_full = feat_eval_full.dropna()
 
@@ -794,7 +816,7 @@ with tab_backtest:
         st.error("평가일 데이터에서 유효한 피처를 만들지 못했습니다.")
         st.stop()
 
-    # 6-2) 평가용 공통 구조
+    # 5-2) 평가용 공통 구조
     close_raw = eval_df["Close"]
     if isinstance(close_raw, pd.DataFrame):
         close_raw = close_raw.iloc[:, 0]
@@ -865,7 +887,7 @@ with tab_backtest:
     res_df = pd.DataFrame(results)
     st.success("하루 전체 예측 완료!")
 
-    # 7) horizon별 성능 요약 (정량 지표)
+    # 6) horizon별 성능 요약 (정량 지표)
     st.subheader("📊 성능 요약")
 
     perf_rows = []
@@ -914,7 +936,7 @@ with tab_backtest:
     else:
         st.write("성능을 계산할 수 있는 유효한 샘플이 없습니다.")
 
-    # 8) n분 뒤 예측 차트 vs 실제 차트 + 오차 그래프
+    # 7) n분 뒤 예측 차트 vs 실제 차트 + 오차 그래프
     st.subheader("📉 예측 차트 vs 실제 차트")
 
     if len(horizons_bt) == 0:
@@ -932,7 +954,49 @@ with tab_backtest:
     if view.empty:
         st.write("선택한 horizon에 대해 표시할 데이터가 없습니다.")
     else:
+        # 세션 구분을 위한 KST 기준 오픈/클로즈
+        open_kst, close_kst = get_kst_session_times(use_dst)
+
+        # 세션 마스크 및 색상 정의
+        session_colors = {
+            "premarket": "rgba(150, 200, 255, 0.12)",  # 연파랑
+            "regular": "rgba(150, 255, 150, 0.15)",    # 연초록
+            "after": "rgba(180, 180, 180, 0.12)",      # 연회색
+        }
+
+        times = view["time"]
+        session_mask = get_session_mask_kst(times, open_kst, close_kst)
+
+        # 같은 세션이 연속되면 하나의 구간으로 묶기
+        shaded_regions = []
+        start_idx = 0
+        for i in range(1, len(times)):
+            if session_mask[i] != session_mask[i - 1]:
+                shaded_regions.append((start_idx, i - 1, session_mask[i - 1]))
+                start_idx = i
+        shaded_regions.append((start_idx, len(times) - 1, session_mask[-1]))
+
         fig_price = go.Figure()
+
+        # 세션 배경 먼저 추가
+        for start, end, label in shaded_regions:
+            color = session_colors.get(label)
+            if color is None:
+                continue
+            fig_price.add_shape(
+                type="rect",
+                x0=times.iloc[start],
+                x1=times.iloc[end],
+                y0=0,
+                y1=1,
+                xref="x",
+                yref="paper",
+                fillcolor=color,
+                line_width=0,
+                layer="below",
+            )
+
+        # 예측 / 실제 라인
         fig_price.add_trace(
             go.Scatter(
                 x=view["time"],
@@ -950,7 +1014,7 @@ with tab_backtest:
             )
         )
         fig_price.update_layout(
-            title=f"{ticker} — {h_sel}분 뒤 예측 vs 실제 (KST)",
+            title=f"{ticker} — {eval_us_date} (미국 기준) {h_sel}분 뒤 예측 vs 실제 (KST)",
             xaxis_title="예측 시점 (KST)",
             yaxis_title=f"{h_sel}분 뒤 가격",
             legend=dict(orientation="h"),
@@ -979,7 +1043,7 @@ with tab_backtest:
         )
         st.plotly_chart(fig_err, use_container_width=True)
 
-        # 9) 선택한 horizon에 대한 자동 해석
+        # 8) 선택한 horizon에 대한 자동 해석
         st.markdown("### 🧠 해석")
 
         actual = view["actual_num"].to_numpy()
