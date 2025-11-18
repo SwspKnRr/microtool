@@ -28,7 +28,6 @@ matplotlib.rcParams["axes.unicode_minus"] = False
 
 
 # ---------- 공통 유틸 함수들 (타임존 & 세션 처리) ---------- #
-
 def to_kst(df: pd.DataFrame) -> pd.DataFrame:
     """
     yfinance에서 받은 DataFrame의 인덱스를 무조건 KST(Asia/Seoul)로 변환.
@@ -132,7 +131,6 @@ def get_session_mask_kst(times: pd.Series, open_kst: dt.time, close_kst: dt.time
 
 
 # ---------- 공통 엔진: 2분봉 → 피처/타깃 → 모델 학습 ---------- #
-
 def run_training_pipeline(
     df_raw: pd.DataFrame,
     base_horizons: list[int],
@@ -145,14 +143,12 @@ def run_training_pipeline(
     - build_targets
     - get_feature_target_matrices
     - train_models
-    탭 4와 탭 5가 둘 다 이 함수만 사용하게 통일.
     """
     feat_df = build_feature_frame(df_raw)
     model_df, horizons = build_targets(
         feat_df,
         base_horizons=base_horizons,
         custom_horizon=int(custom_h) if custom_h else None,
-        threshold=0.0,
     )
     X, y_dict, feature_cols = get_feature_target_matrices(model_df, horizons)
     models, metrics_df = train_models(X, y_dict, random_state=random_state)
@@ -180,7 +176,6 @@ st.caption("2분봉 엔진 하나로 실시간 1분봉 예측 + 하루 힌드캐
 
 
 # ---------- 세션 상태 초기화 ---------- #
-
 def init_state():
     defaults = {
         "raw_df": None,          # 2분봉 데이터 (KST, tz-aware)
@@ -292,9 +287,9 @@ with tab_live:
             st.dataframe(
                 metrics_df.style.format(
                     {
-                        "accuracy": "{:.3f}",
-                        "precision": "{:.3f}",
-                        "recall": "{:.3f}",
+                        "MAE": "{:.4f}",
+                        "RMSE": "{:.4f}",
+                        "direction_acc": "{:.3f}",
                     }
                 ),
                 use_container_width=True,
@@ -313,25 +308,38 @@ with tab_live:
     else:
         # ----- 최신 2분봉 기준 예측 결과 (테이블) ----- #
         latest_row = model_df.iloc[-1]
-        probs = predict_latest(models, latest_row, feature_cols)  # {model_horizon: p_up}
+        ret_preds = predict_latest(models, latest_row, feature_cols)  # {h: future_ret_pred}
 
-        st.markdown("### 🔮 현재(가장 최근 2분봉, KST) 기준 예측 결과")
+        st.markdown("### 🔮 현재(가장 최근 2분봉, KST) 기준 예측 수익률 / 가격")
+
+        last_close = float(latest_row["Close"])
 
         rows = []
-        for h in sorted(probs.keys()):
+        for h in sorted(ret_preds.keys()):
+            r = ret_preds[h]
+            price_pred = last_close * (1.0 + r)
             rows.append(
                 {
                     "horizon_min": h,
-                    "up_prob": probs[h],
+                    "ret_pred": r,
+                    "price_pred": price_pred,
                 }
             )
         prob_df = pd.DataFrame(rows).set_index("horizon_min")
-        st.dataframe(prob_df.style.format({"up_prob": "{:.2%}"}))
+        st.dataframe(
+            prob_df.style.format(
+                {
+                    "ret_pred": "{:.3%}",
+                    "price_pred": "{:.2f}",
+                }
+            ),
+            use_container_width=True,
+        )
 
         st.markdown("---")
 
-        # ----- 1-3. 실시간 1분봉 차트 & 현재가 + 모델 보정 예상가 ----- #
-        st.markdown("### 🕯 1분봉 실시간 캔들 차트 (KST) + 현재가 + 모델 보정 예상 가격")
+        # ----- 1-3. 실시간 1분봉 차트 & 현재가 + horizon별 예상가 ----- #
+        st.markdown("### 🕯 1분봉 실시간 캔들 차트 (KST) + 현재가 + 회귀 기반 예상 가격")
 
         col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([1.2, 1.2, 2.6])
         with col_ctrl1:
@@ -417,154 +425,73 @@ with tab_live:
 
             open_kst, close_kst = get_kst_session_times(use_dst)
 
-            # ===== 최근 추세 기반 여러 시간대 예상 가격 + 모델 확률 보정 ===== #
-            reg_window = min(50, len(df_plot))
-            y_arr = df_plot["Close"].tail(reg_window).values
-            x_arr = np.arange(reg_window)
+            # ===== horizon별 예측 가격 (회귀 기반, 선형 스케일링) ===== #
+            preds: dict[int, float] = {}  # {horizon_min: pred_price}
+            model_horizons = list(ret_preds.keys())
 
-            preds: dict[int, float] = {}  # {horizon_min: adjusted_price}
-            pred_close = None  # 종가 예상 (있으면 float)
-
-            model_horizons = list(probs.keys())
-
-            def get_nearest_model_prob(target_min: int) -> float | None:
-                """사용자 horizon(분)을 가장 가까운 모델 horizon과 매칭해서 p_up 가져오기."""
+            def get_scaled_ret_for(target_min: int) -> float | None:
+                """
+                엔진이 가지고 있는 horizon 중 가장 가까운 h_model의
+                future_ret_pred 를 가져와서
+                target_min / h_model 비율만큼 선형 스케일링.
+                """
                 if not model_horizons:
                     return None
                 nearest_h = min(model_horizons, key=lambda H: abs(H - target_min))
-                return probs.get(nearest_h, None)
+                base_ret = ret_preds.get(nearest_h, None)
+                if base_ret is None:
+                    return None
+                scale = target_min / nearest_h
+                return base_ret * scale
 
-            if reg_window >= 2:
-                slope, intercept = np.polyfit(x_arr, y_arr, 1)
+            for h_min, flag in horizon_flags.items():
+                if not flag:
+                    continue
+                r_scaled = get_scaled_ret_for(h_min)
+                if r_scaled is None:
+                    continue
+                preds[h_min] = float(last_price * (1.0 + r_scaled))
 
-                # 1) 일반 horizon들 (1/3/10/30/60/120/300분)
-                for h_min, flag in horizon_flags.items():
-                    if not flag:
+            # 종가 예측 (폐장까지 남은 시간 기준)
+            pred_close = None
+            if show_close_chk:
+                minutes_to_close = minutes_to_close_kst(last_time, open_kst, close_kst)
+                if minutes_to_close is not None and minutes_to_close > 0:
+                    r_scaled = get_scaled_ret_for(minutes_to_close)
+                    if r_scaled is not None:
+                        pred_close = float(last_price * (1.0 + r_scaled))
+
+            # ----- 예측 로그 저장 (5분 / 10분 / 1시간 / 6시간 / 1일) ----- #
+            if st.session_state["pred_log"] is None:
+                st.session_state["pred_log"] = pd.DataFrame(
+                    columns=["made_at", "horizon_min", "base_price", "pred_price", "eval_time"]
+                )
+
+            last_logged = st.session_state.get("last_logged_time", None)
+            if (last_logged is None) or (last_time > last_logged):
+                log_horizons = [5, 10, 60, 360, 1440]
+                new_rows = []
+                for h_log in log_horizons:
+                    r_scaled = get_scaled_ret_for(h_log)
+                    if r_scaled is None:
                         continue
-
-                    p_trend = last_price + slope * h_min
-                    p_up = get_nearest_model_prob(h_min)
-
-                    if p_up is None:
-                        preds[h_min] = p_trend
-                    else:
-                        base_w = 0.3  # 최소 추세 비중
-                        confidence = 2 * abs(p_up - 0.5)  # 0~1
-                        w = base_w + (1 - base_w) * confidence
-                        w = float(np.clip(w, 0.0, 1.0))
-
-                        p_adj = (1 - w) * last_price + w * p_trend
-                        preds[h_min] = p_adj
-
-                # 2) 종가 예상 (KST 기준 미국 폐장 시각)
-                if show_close_chk:
-                    minutes_to_close = minutes_to_close_kst(last_time, open_kst, close_kst)
-                    if minutes_to_close is not None and minutes_to_close > 0:
-                        p_trend_close = last_price + slope * minutes_to_close
-                        p_up_close = get_nearest_model_prob(minutes_to_close)
-
-                        if p_up_close is None:
-                            pred_close = p_trend_close
-                        else:
-                            base_w = 0.3
-                            confidence = 2 * abs(p_up_close - 0.5)
-                            w = base_w + (1 - base_w) * confidence
-                            w = float(np.clip(w, 0.0, 1.0))
-                            pred_close = (1 - w) * last_price + w * p_trend_close
-                    else:
-                        pred_close = None
-
-                # ----- 예측 로그 저장 (5분 / 10분 / 1시간 / 6시간 / 1일) ----- #
-                if st.session_state["pred_log"] is None:
-                    st.session_state["pred_log"] = pd.DataFrame(
-                        columns=["made_at", "horizon_min", "base_price", "pred_price", "eval_time"]
-                    )
-
-                last_logged = st.session_state.get("last_logged_time", None)
-
-                if (last_logged is None) or (last_time > last_logged):
-                    log_horizons = [5, 10, 60, 360, 1440]
-
-                    new_rows = []
-                    for h_log in log_horizons:
-                        p_trend_h = last_price + slope * h_log
-                        p_up_h = get_nearest_model_prob(h_log)
-
-                        if p_up_h is None:
-                            p_adj_h = p_trend_h
-                        else:
-                            base_w = 0.3
-                            confidence = 2 * abs(p_up_h - 0.5)  # 0~1
-                            w_h = base_w + (1 - base_w) * confidence
-                            w_h = float(np.clip(w_h, 0.0, 1.0))
-                            p_adj_h = (1 - w_h) * last_price + w_h * p_trend_h
-
-                        eval_time = last_time + dt.timedelta(minutes=h_log)
-
-                        new_rows.append(
-                            {
-                                "made_at": last_time,
-                                "horizon_min": h_log,
-                                "base_price": last_price,
-                                "pred_price": p_adj_h,
-                                "eval_time": eval_time,
-                            }
-                        )
-
-                    if new_rows:
-                        st.session_state["pred_log"] = pd.concat(
-                            [st.session_state["pred_log"], pd.DataFrame(new_rows)],
-                            ignore_index=True,
-                        )
-                        st.session_state["last_logged_time"] = last_time
-
-            # ===== 30분 전에 예상했던 현재가 (과거 예측 검증, KST 기준) ===== #
-            back_result = None
-            try:
-                t_now = intraday_df.index[-1]  # KST
-                t_back = t_now - dt.timedelta(minutes=30)
-
-                intraday_back = intraday_df[intraday_df.index <= t_back]
-                if len(intraday_back) >= 10:
-                    back_window = min(50, len(intraday_back))
-                    y_back = intraday_back["Close"].tail(back_window).values
-                    x_back = np.arange(back_window)
-                    slope_back, intercept_back = np.polyfit(x_back, y_back, 1)
-
-                    price_back = intraday_back["Close"].iloc[-1]
-
-                    p_trend_back_30 = price_back + slope_back * 30
-
-                    df2 = model_df
-                    idx_candidates = df2.index[df2.index <= t_back]
-                    if len(idx_candidates) > 0:
-                        idx_back = idx_candidates[-1]
-                        past_row = df2.loc[idx_back]
-                        past_probs = predict_latest(models, past_row, feature_cols)
-
-                        model_hs_back = list(past_probs.keys())
-                        nearest_h_back = min(model_hs_back, key=lambda H: abs(H - 30))
-                        p_up_back = past_probs[nearest_h_back]
-
-                        base_w = 0.3
-                        confidence = 2 * abs(p_up_back - 0.5)
-                        w_back = base_w + (1 - base_w) * confidence
-                        w_back = float(np.clip(w_back, 0.0, 1.0))
-
-                        p_adj_back_30 = (1 - w_back) * price_back + w_back * p_trend_back_30
-
-                        error = last_price - p_adj_back_30
-                        error_pct = error / last_price if last_price != 0 else np.nan
-
-                        back_result = {
-                            "pred": p_adj_back_30,
-                            "actual": last_price,
-                            "error": error,
-                            "error_pct": error_pct,
-                            "time_back": intraday_back.index[-1],
+                    pred_price_log = float(last_price * (1.0 + r_scaled))
+                    eval_time = last_time + dt.timedelta(minutes=h_log)
+                    new_rows.append(
+                        {
+                            "made_at": last_time,
+                            "horizon_min": h_log,
+                            "base_price": last_price,
+                            "pred_price": pred_price_log,
+                            "eval_time": eval_time,
                         }
-            except Exception:
-                back_result = None
+                    )
+                if new_rows:
+                    st.session_state["pred_log"] = pd.concat(
+                        [st.session_state["pred_log"], pd.DataFrame(new_rows)],
+                        ignore_index=True,
+                    )
+                    st.session_state["last_logged_time"] = last_time
 
             # 메인 레이아웃: 차트(좌) + 정보(우)
             chart_col, info_col = st.columns([4, 1])
@@ -601,7 +528,6 @@ with tab_live:
                 times = df_plot.index
                 session_mask = get_session_mask_kst(times, open_kst, close_kst)
 
-                # 같은 세션이 연속되면 하나의 구간으로 묶기
                 shaded_regions = []
                 start_idx = 0
                 for i in range(1, len(times)):
@@ -730,35 +656,20 @@ with tab_live:
 
                 st.plotly_chart(fig_c, use_container_width=True)
 
-
-
             with info_col:
                 st.markdown("#### 💰 현재가")
                 st.metric(label="Price", value=f"{last_price:,.2f}")
 
-                st.markdown("#### 🔮 모델 보정 예상가")
+                st.markdown("#### 🔮 회귀 기반 예상가")
                 if preds:
                     for h_min in sorted(preds.keys()):
                         price = preds[h_min]
                         st.metric(label=f"+{h_min}분", value=f"{price:,.2f}")
                 else:
-                    st.write("예상가: 계산 불가 (데이터 또는 모델 확률 부족)")
+                    st.write("예상가: 계산 불가 (데이터 또는 모델 예측 없음)")
 
                 if pred_close is not None and np.isfinite(pred_close):
                     st.metric(label="종가 예상", value=f"{pred_close:,.2f}")
-
-                st.markdown("#### ⏪ 30분 전 예측 vs 현재")
-                if back_result is not None:
-                    st.write(
-                        f"30분 전 시점: {back_result['time_back'].strftime('%Y-%m-%d %H:%M')}"
-                    )
-                    st.write(f"그때 30분 뒤 예상가: {back_result['pred']:.2f}")
-                    st.write(f"현재 실제가: {back_result['actual']:.2f}")
-                    st.write(
-                        f"오차: {back_result['error']:+.2f} ({back_result['error_pct']*100:+.2f}%)"
-                    )
-                else:
-                    st.write("30분 전 예측값을 계산할 수 있는 데이터가 부족합니다.")
 
                 st.markdown("#### 🕒 시각 (KST)")
                 st.write(last_time.strftime("%Y-%m-%d %H:%M:%S"))
@@ -770,7 +681,7 @@ with tab_live:
                 st.caption(
                     "※ 모든 시간은 한국시간(KST, UTC+9) 기준입니다.\n"
                     "※ 정규장 시간대는 DST 체크박스에 따라 KST 22:30~05:00 또는 23:30~06:00으로 간주됩니다.\n"
-                    "※ 예상 가격은 최근 1분봉 추세 + 2분봉 모델 상승 확률을 함께 반영한 단순 보정값입니다."
+                    "※ 예상 가격은 2분봉 엔진이 직접 예측한 '미래 수익률(%)'을 현재가에 곱해 계산한 값입니다."
                 )
 
             st.markdown("#### 🔎 최근 1분봉 원시 데이터 (마지막 5개, KST)")
@@ -856,7 +767,7 @@ with tab_backtest:
         st.markdown("### 📊 이 힌드캐스트에서 사용한 엔진 성능 (훈련 데이터 내 테스트)")
         st.dataframe(
             metrics_bt.style.format(
-                {"accuracy": "{:.3f}", "precision": "{:.3f}", "recall": "{:.3f}"}
+                {"MAE": "{:.4f}", "RMSE": "{:.4f}", "direction_acc": "{:.3f}"}
             ),
             use_container_width=True,
         )
@@ -880,6 +791,11 @@ with tab_backtest:
 
     idx_positions = {ts: i for i, ts in enumerate(eval_df.index)}
 
+    # 분 → 2분봉 steps 변환 함수 (core와 동일 로직)
+    def minutes_to_steps(h_min: int) -> int:
+        steps = int(round(h_min / 2.0))
+        return max(1, steps)
+
     results = []
 
     for ts in feat_eval_full.index:
@@ -893,14 +809,6 @@ with tab_backtest:
             continue
         cur_price = float(cur_val)
 
-        # 최근 추세 (마지막 20캔들 기준)
-        window = min(20, pos + 1)
-        if window < 5:
-            continue
-        y_trend = close_series.iloc[pos - window + 1: pos + 1].values
-        x_trend = np.arange(window)
-        slope, intercept = np.polyfit(x_trend, y_trend, 1)
-
         # 피처 벡터
         feat_row = feat_eval_full.loc[ts, feature_cols_bt]
         if feat_row.isna().any():
@@ -909,20 +817,13 @@ with tab_backtest:
 
         # 각 horizon마다 예측
         for h in horizons_bt:
-            # 모델 상승 확률
-            prob = models_bt[h].predict_proba(X_row)[0, 1]
-
-            # 순수 추세 기반 예측 (2분봉이라 h/2 캔들 뒤)
-            steps = h / 2.0
-            trend_price = cur_price + slope * steps
-
-            # 확률 기반 가중치
-            confidence = 2 * abs(prob - 0.5)  # 0~1
-            w = 0.3 + 0.7 * confidence       # 최소 0.3, 최대 1.0
-            pred_price = cur_price + (trend_price - cur_price) * w
+            # 미래 수익률 회귀 예측
+            ret_pred = float(models_bt[h].predict(X_row)[0])
+            pred_price = cur_price * (1.0 + ret_pred)
 
             # 실제 h분 뒤 가격
-            target_idx = pos + int(steps)
+            steps = minutes_to_steps(h)
+            target_idx = pos + steps
             if target_idx < len(close_series):
                 actual_val = close_series.iloc[target_idx]
                 actual_price = float(actual_val) if np.isfinite(actual_val) else None
@@ -933,7 +834,7 @@ with tab_backtest:
                 {
                     "time": ts,
                     "horizon": h,
-                    "pred_prob": float(prob),
+                    "ret_pred": ret_pred,
                     "current_price": cur_price,
                     "pred_price": pred_price,
                     "actual_price": actual_price,
@@ -964,20 +865,21 @@ with tab_backtest:
         pred = pred[mask]
         cur = cur[mask]
 
-        actual_dir = (actual > cur).astype(int)
-        pred_dir = (pred > cur).astype(int)
-        dir_acc = (actual_dir == pred_dir).mean()
+        # 수익률 기준으로 다시 계산
+        actual_ret = (actual / cur) - 1.0
+        pred_ret = (pred / cur) - 1.0
 
-        mae = np.mean(np.abs(actual - pred))
-        mape = np.mean(np.abs(actual - pred) / actual)
+        mae = float(np.mean(np.abs(actual_ret - pred_ret)))
+        mape = float(np.mean(np.abs(actual_ret - pred_ret) / (np.abs(actual_ret) + 1e-9)))
+        dir_acc = float((np.sign(actual_ret) == np.sign(pred_ret)).mean())
 
         perf_rows.append(
             {
                 "horizon_min": h,
                 "samples": int(mask.sum()),
                 "direction_acc": dir_acc,
-                "MAE": mae,
-                "MAPE": mape,
+                "MAE_ret": mae,
+                "MAPE_ret": mape,
             }
         )
 
@@ -985,7 +887,7 @@ with tab_backtest:
         perf_df = pd.DataFrame(perf_rows)
         st.dataframe(
             perf_df.style.format(
-                {"direction_acc": "{:.3f}", "MAE": "{:.4f}", "MAPE": "{:.3%}"}
+                {"direction_acc": "{:.3f}", "MAE_ret": "{:.4f}", "MAPE_ret": "{:.2%}"}
             ),
             use_container_width=True,
         )
@@ -1010,85 +912,36 @@ with tab_backtest:
     if view.empty:
         st.write("선택한 horizon에 대해 표시할 데이터가 없습니다.")
     else:
-        # 세션 구분을 위한 KST 기준 오픈/클로즈
-        open_kst, close_kst = get_kst_session_times(use_dst)
-
-        # 세션 마스크 및 색상 정의
-        session_colors = {
-            "premarket": "rgba(150, 200, 255, 0.12)",  # 연파랑
-            "regular": "rgba(150, 255, 150, 0.15)",    # 연초록
-            "after": "rgba(180, 180, 180, 0.12)",      # 연회색
-        }
-
-        times = view["time"]
-        session_mask = get_session_mask_kst(times, open_kst, close_kst)
-
-        # 같은 세션이 연속되면 하나의 구간으로 묶기
-        shaded_regions = []
-        start_idx = 0
-        for i in range(1, len(times)):
-            if session_mask[i] != session_mask[i - 1]:
-                shaded_regions.append((start_idx, i - 1, session_mask[i - 1]))
-                start_idx = i
-        shaded_regions.append((start_idx, len(times) - 1, session_mask[-1]))
-
-        fig_price = go.Figure()
-
-        # 세션 배경 먼저 추가
-        for start, end, label in shaded_regions:
-            color = session_colors.get(label)
-            if color is None:
-                continue
-            fig_price.add_shape(
-                type="rect",
-                x0=times.iloc[start],
-                x1=times.iloc[end],
-                y0=0,
-                y1=1,
-                xref="x",
-                yref="paper",
-                fillcolor=color,
-                line_width=0,
-                layer="below",
-            )
-
-# h_sel = 선택된 horizon (분)
-
-# 미래 시간축 생성 (ts + h_sel 분)
+        # 미래 시간축 생성 (ts + h_sel 분)
         future_times = view["time"] + pd.to_timedelta(h_sel, unit="m")
 
         fig_price = go.Figure()
-
-# --- 예측선 ---
         fig_price.add_trace(
-             go.Scatter(
-                   x=future_times,
-                  y=view["pred_num"],
-                   name=f"{h_sel}분 뒤 예상가",
-                  line=dict(color="#6EA6FF", dash="dot"),
-             )
+            go.Scatter(
+                x=future_times,
+                y=view["pred_num"],
+                name=f"{h_sel}분 뒤 예상가",
+                line=dict(color="#6EA6FF", dash="dot"),
+            )
         )
-
-# --- 실제선 ---
         fig_price.add_trace(
-             go.Scatter(
-                 x=future_times,
-                 y=view["actual_num"],
-                 name=f"{h_sel}분 뒤 실제가격",
-                 line=dict(color="#FF8A8A"),
-             )
+            go.Scatter(
+                x=future_times,
+                y=view["actual_num"],
+                name=f"{h_sel}분 뒤 실제가격",
+                line=dict(color="#FF8A8A"),
+            )
         )
 
         fig_price.update_layout(
-             title=f"{ticker} — {h_sel}분 뒤 예측 vs 실제 (실제 시간축 기준, KST)",
-                 xaxis_title="실제 시각 (KST)",
-                 yaxis_title=f"{h_sel}분 뒤 가격",
-                 legend=dict(orientation="h"),
-                 height=420,
-                 margin=dict(l=10, r=10, t=50, b=10),
+            title=f"{ticker} — {h_sel}분 뒤 예측 vs 실제 (실제 시간축 기준, KST)",
+            xaxis_title="실제 시각 (KST)",
+            yaxis_title=f"{h_sel}분 뒤 가격",
+            legend=dict(orientation="h"),
+            height=420,
+            margin=dict(l=10, r=10, t=50, b=10),
         )
         st.plotly_chart(fig_price, use_container_width=True)
-
 
         err = view["actual_num"] - view["pred_num"]
         fig_err = go.Figure()
@@ -1117,16 +970,17 @@ with tab_backtest:
         pred = view["pred_num"].to_numpy()
         cur = view["cur_num"].to_numpy()
         samples = len(actual)
-        actual_dir = (actual > cur).astype(int)
-        pred_dir = (pred > cur).astype(int)
-        dir_acc = (actual_dir == pred_dir).mean()
-        mae = np.mean(np.abs(actual - pred))
-        mape = np.mean(np.abs(actual - pred) / actual)
+        actual_ret = actual / cur - 1.0
+        pred_ret = pred / cur - 1.0
+
+        dir_acc = float((np.sign(actual_ret) == np.sign(pred_ret)).mean())
+        mae = float(np.mean(np.abs(actual_ret - pred_ret)))
+        mape = float(np.mean(np.abs(actual_ret - pred_ret) / (np.abs(actual_ret) + 1e-9)))
 
         st.write(f"- 샘플 수: **{samples}개**")
         st.write(f"- 방향 예측 정확도: **{dir_acc*100:.1f}%**")
-        st.write(f"- MAE(평균 절대 오차): **{mae:.4f}**")
-        st.write(f"- MAPE(평균 절대 오차율): **{mape*100:.2f}%**")
+        st.write(f"- MAE(수익률 기준): **{mae:.4f}**")
+        st.write(f"- MAPE(수익률 기준): **{mape*100:.2f}%**")
 
         st.markdown("---")
 
@@ -1138,6 +992,6 @@ with tab_backtest:
             st.warning("📉 방향 예측력이 거의 코인 플립 수준이거나 그 이하입니다. 이 horizon은 실전에 쓰기 어렵습니다.")
 
         if mape < 0.3:
-            st.success("🎯 가격 오차도 30% 미만이라, 대략적인 ‘가격 범위’ 감을 잡는 데는 쓸 수 있습니다.")
+            st.success("🎯 수익률 기준 오차도 30% 미만이라, 대략적인 ‘방향+강도’ 감을 잡는 데는 쓸 수 있습니다.")
         else:
-            st.warning("⚠ 가격 오차가 큰 편이라, 정확한 진입/청산 가격보다는 '방향' 중심으로만 참고하는 편이 낫습니다.")
+            st.warning("⚠ 오차가 큰 편이라, 정확한 진입/청산 가격보다는 '방향' 중심으로만 참고하는 편이 낫습니다.")
