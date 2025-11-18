@@ -8,6 +8,32 @@ import yfinance as yf
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, precision_score, recall_score
 
+def fetch_1min_intraday(ticker, days=3):
+    df = yf.download(
+        ticker,
+        period=f"{days}d",
+        interval="1m",
+        prepost=True,
+        progress=False
+    )
+    return df
+
+def fetch_1min_intraday(ticker, days=7):
+    """
+    yfinance는 1분봉을 최대 7일만 제공하므로 그 이상은 불가능.
+    days > 7 이면 7로 강제 조정.
+    """
+    days = min(days, 7)
+
+    df = yf.download(
+        ticker,
+        period=f"{days}d",
+        interval="1m",
+        prepost=True,
+        progress=False
+    )
+    return df
+
 
 # ---------- RSI 계산 ---------- #
 def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
