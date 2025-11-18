@@ -861,30 +861,38 @@ with tab5:
 
     # ----- 피처 생성 -----
     def make_features(df: pd.DataFrame) -> pd.DataFrame:
-    # df가 비었거나 이상하면 그냥 빈 DataFrame 반환
+         """
+         2분봉/1분봉 DataFrame(df)에서 피처 프레임 생성.
+         - Close, Volume 컬럼 기준
+         - 인덱스: df.index (DatetimeIndex, KST)
+          """
+    # 이상한 입력이면 바로 빈 DF 반환
          if df is None or not isinstance(df, pd.DataFrame) or df.empty:
              return pd.DataFrame()
 
-         close = df["Close"]
-         vol = df["Volume"] if "Volume" in df.columns else pd.Series(index=df.index, data=np.nan)
+         if "Close" not in df.columns:
+             return pd.DataFrame()
 
-    # 🔹 index를 명시해서 생성 → 빈 시리즈여도 에러 안 남
-         X = pd.DataFrame(
-             {
-                  "ret1": close.pct_change(),
-                  "ma5": close.rolling(5).mean(),
-                  "ma20": close.rolling(20).mean(),
-                  "vol": vol,
-              },
-              index=df.index,
-    )
+    # 안전하게 숫자형으로 변환
+         close = pd.to_numeric(df["Close"], errors="coerce")
+         vol_raw = df["Volume"] if "Volume" in df.columns else pd.Series(index=df.index, data=np.nan)
+         vol = pd.to_numeric(vol_raw, errors="coerce")
 
+    # 🔹 먼저 인덱스만 가진 빈 DF 생성
+         X = pd.DataFrame(index=df.index)
+
+    # 🔹 컬럼 하나씩 추가 → 전부 1차원이라 에러 안 난다
+         X["ret1"] = close.pct_change()
+         X["ma5"] = close.rolling(5).mean()
+         X["ma20"] = close.rolling(20).mean()
+         X["vol"] = vol
          X["trend"] = close.diff()
 
-    # 전부 NaN인 초반부는 버림
+    # 초반부 NaN, 이상치 제거
          X = X.dropna()
 
          return X
+
 
 
     # horizon 설정 (5, 10, 30분 등 필요하면 변경)
