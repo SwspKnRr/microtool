@@ -1015,7 +1015,7 @@ with tab5:
     st.success("하루 전체 예측 완료!")
 
         # =============================
-    # 5) 성능 계산
+    # 5) 성능 계산 (넘파이 기반으로 깔끔하게)
     # =============================
     st.subheader("📊 성능 요약")
 
@@ -1023,26 +1023,29 @@ with tab5:
     for h in horizons:
         # 해당 horizon만 추출
         sub = res_df[res_df["horizon"] == h].copy()
-
-        # 실제/현재/확률이 모두 있는 행만 사용
-        sub = sub.dropna(subset=["actual_price", "current_price", "pred_prob"])
         if sub.empty:
             continue
 
-        # 숫자로 강제 변환 (이 단계에서 object/문자/이상 타입 정리)
-        sub["actual_price_num"] = pd.to_numeric(sub["actual_price"], errors="coerce")
-        sub["current_price_num"] = pd.to_numeric(sub["current_price"], errors="coerce")
-        sub["pred_prob_num"] = pd.to_numeric(sub["pred_prob"], errors="coerce")
+        # 숫자로 강제 변환
+        actual_price = pd.to_numeric(sub["actual_price"], errors="coerce").to_numpy()
+        current_price = pd.to_numeric(sub["current_price"], errors="coerce").to_numpy()
+        pred_prob = pd.to_numeric(sub["pred_prob"], errors="coerce").to_numpy()
 
-        sub = sub.dropna(subset=["actual_price_num", "current_price_num", "pred_prob_num"])
-        if sub.empty:
+        # 유효한(숫자인) 샘플만 필터링
+        mask = (
+            np.isfinite(actual_price) &
+            np.isfinite(current_price) &
+            np.isfinite(pred_prob)
+        )
+
+        if mask.sum() == 0:
             continue
 
-        # numpy 배열로 꺼내서 순수 수치 연산 (pandas 비교 버그 회피)
-        actual_price = sub["actual_price_num"].to_numpy()
-        current_price = sub["current_price_num"].to_numpy()
-        pred_prob = sub["pred_prob_num"].to_numpy()
+        actual_price = actual_price[mask]
+        current_price = current_price[mask]
+        pred_prob = pred_prob[mask]
 
+        # 방향 (상승=1, 하락=0)
         actual_dir = (actual_price > current_price).astype(int)
         pred_dir = (pred_prob > 0.5).astype(int)
 
@@ -1052,7 +1055,7 @@ with tab5:
 
         perf_rows.append({
             "horizon": h,
-            "samples": len(sub),
+            "samples": int(mask.sum()),
             "accuracy": acc,
             "MAE": mae,
             "MAPE": mape,
@@ -1063,10 +1066,6 @@ with tab5:
         st.dataframe(perf_df, use_container_width=True)
     else:
         st.write("성능을 계산할 수 있는 유효한 샘플이 없습니다.")
-
-
-    perf_df = pd.DataFrame(perf_rows)
-    st.dataframe(perf_df, use_container_width=True)
 
         # =============================
     # 6) 차트 시각화
