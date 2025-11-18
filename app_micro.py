@@ -573,20 +573,47 @@ with tab_live:
                     ]
                 )
 
-                fig_c.update_layout(
-                    dragmode=False,
-                    xaxis=dict(fixedrange=True),
-                    yaxis=dict(fixedrange=True),
-                    modebar_remove=[
-                        "zoom",
-                        "select",
-                        "lasso2d",
-                        "pan",
-                        "resetScale2d",
-                    ],
-                )
+                # --- 세션 배경 (프리장 / 데이장 / 애프터장) 음영 추가 --- #
+                session_colors = {
+                    "premarket": "rgba(150, 200, 255, 0.12)",  # 연파랑
+                    "regular": "rgba(150, 255, 150, 0.15)",    # 연초록(데이장)
+                    "after": "rgba(180, 180, 180, 0.12)",      # 연회색
+                }
+
+                times = df_plot.index
+                session_mask = get_session_mask_kst(times, open_kst, close_kst)
+
+                # 같은 세션이 연속되면 하나의 구간으로 묶기
+                shaded_regions = []
+                start_idx = 0
+                for i in range(1, len(times)):
+                    if session_mask[i] != session_mask[i - 1]:
+                        shaded_regions.append((start_idx, i - 1, session_mask[i - 1]))
+                        start_idx = i
+                shaded_regions.append((start_idx, len(times) - 1, session_mask[-1]))
 
                 shapes = []
+                # 배경 rect 먼저 shapes에 추가 (layer='below')
+                for start, end, label in shaded_regions:
+                    color = session_colors.get(label)
+                    if color is None:
+                        continue
+                    shapes.append(
+                        dict(
+                            type="rect",
+                            xref="x",
+                            x0=times[start],
+                            x1=times[end],
+                            yref="paper",
+                            y0=0,
+                            y1=1,
+                            fillcolor=color,
+                            line_width=0,
+                            layer="below",
+                        )
+                    )
+
+                # 이후에 예측 수평선/annotation 추가
                 annotations = []
 
                 x_positions = {
@@ -666,6 +693,16 @@ with tab_live:
                     )
 
                 fig_c.update_layout(
+                    dragmode=False,
+                    xaxis=dict(fixedrange=True),
+                    yaxis=dict(fixedrange=True),
+                    modebar_remove=[
+                        "zoom",
+                        "select",
+                        "lasso2d",
+                        "pan",
+                        "resetScale2d",
+                    ],
                     xaxis_rangeslider_visible=False,
                     margin=dict(l=10, r=10, t=40, b=40),
                     height=450,
@@ -675,6 +712,7 @@ with tab_live:
                 )
 
                 st.plotly_chart(fig_c, use_container_width=True)
+
 
             with info_col:
                 st.markdown("#### 💰 현재가")
