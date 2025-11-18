@@ -816,33 +816,35 @@ with tab4:
 
 
 # ============================
-# 📊 5번 탭: 하루 힌드캐스트 테스트 (예측 vs 실제 차트 강화판)
+# 📊 5번 탭: 하루 힌드캐스트 테스트
+#      (n분 뒤 예측 차트 vs 실제 차트 + 오차 + 해석)
 # ============================
 
 with tab5:
-    st.header("📅 하루 힌드캐스트 테스트 (강화된 시각화 / 예측 해석 포함)")
+    st.header("📅 하루 힌드캐스트 테스트 (예측 vs 실제)")
 
     # --------------------------------------------------------
-    # 0) UI: 며칠 전 하루를 평가할지 선택
+    # 0) 며칠 전 하루를 평가할지
     # --------------------------------------------------------
     eval_offset_days = st.slider("며칠 전 하루를 평가할까요?", 1, 7, 6)
-    st.info(f"{eval_offset_days}일 전 데이터를 기반으로 하루 종일 예측해보고, "
-            f"예측 vs 실제 차트를 비교합니다.")
+    st.info(f"{eval_offset_days}일 전 데이터를 가지고, "
+            f"그날 장을 하루 종일 예측했다고 가정하고 성능을 평가합니다.")
 
     # --------------------------------------------------------
-    # 1) 날짜 계산 (KST)
+    # 1) 날짜 계산 (KST 기준)
     # --------------------------------------------------------
     now = dt.datetime.now(dt.timezone.utc).astimezone(ZoneInfo("Asia/Seoul"))
-    eval_date = now.date() - dt.timedelta(days=eval_offset_days)
-    train_end_date = now.date() - dt.timedelta(days=eval_offset_days + 1)
+    eval_date = now.date() - dt.timedelta(days=eval_offset_days)          # 평가일
+    train_end_date = now.date() - dt.timedelta(days=eval_offset_days + 1) # 훈련 종료일(전날까지)
 
     st.write(f"📌 **훈련 종료일:** {train_end_date}")
     st.write(f"📌 **평가일:** {eval_date}")
 
     # --------------------------------------------------------
-    # 2) tab5 전용 피처 함수
+    # 2) tab5 전용 피처 / 타깃 함수
     # --------------------------------------------------------
     def make_features_tab5(df: pd.DataFrame) -> pd.DataFrame:
+        """2분봉 데이터에서 간단한 피처 생성 (tab5 전용)"""
         if df is None or df.empty:
             return pd.DataFrame()
 
@@ -851,9 +853,12 @@ with tab5:
             close_raw = close_raw.iloc[:, 0]
         close = pd.to_numeric(close_raw, errors="coerce")
 
-        vol_raw = df["Volume"] if "Volume" in df.columns else pd.Series(index=df.index, data=np.nan)
-        if isinstance(vol_raw, pd.DataFrame):
-            vol_raw = vol_raw.iloc[:, 0]
+        if "Volume" in df.columns:
+            vol_raw = df["Volume"]
+            if isinstance(vol_raw, pd.DataFrame):
+                vol_raw = vol_raw.iloc[:, 0]
+        else:
+            vol_raw = pd.Series(index=df.index, data=np.nan)
         vol = pd.to_numeric(vol_raw, errors="coerce")
 
         X = pd.DataFrame(index=df.index)
@@ -866,6 +871,7 @@ with tab5:
         return X.dropna()
 
     def make_target_tab5(df: pd.DataFrame, horizon: int) -> pd.Series:
+        """h분 뒤 종가가 현재보다 높은지(1)/아닌지(0)"""
         close_raw = df["Close"]
         if isinstance(close_raw, pd.DataFrame):
             close_raw = close_raw.iloc[:, 0]
@@ -873,7 +879,7 @@ with tab5:
         return (close.shift(-horizon) > close).astype(int)
 
     # --------------------------------------------------------
-    # 3) 훈련 데이터 로딩
+    # 3) 훈련 데이터 로딩 (최근 60일 2분봉 → train_end_date까지)
     # --------------------------------------------------------
     def load_train_df():
         df = fetch_2min_data(ticker, days=60)
@@ -884,15 +890,18 @@ with tab5:
         return df.dropna()
 
     train_df = load_train_df()
-    st.write(f"🔍 훈련용 캔들 수: {len(train_df)}")
+    st.write(f"🔍 훈련용 캔들 수: {len(train_df) if train_df is not None else 0}")
 
-    if train_df is None or len(train_df) < 200:
-        st.error("훈련 데이터가 부족합니다. (최소 200개 필요)")
+    if train_df is None or train_df.empty or len(train_df) < 200:
+        st.error("훈련 데이터가 부족합니다. (최소 200캔들 필요)")
         st.stop()
 
-    # 피처/타깃 생성
     X_train = make_features_tab5(train_df)
-    horizons = [5, 10, 30]
+    if X_train is None or X_train.empty or len(X_train) < 50:
+        st.error("훈련 데이터에서 유효한 피처를 만들지 못했습니다.")
+        st.stop()
+
+    horizons = [5, 10, 30]  # 5분, 10분, 30분 뒤 예측
 
     y_train_dict = {
         h: make_target_tab5(train_df, h).loc[X_train.index]
@@ -900,18 +909,24 @@ with tab5:
     }
 
     # --------------------------------------------------------
-    # 4) 모델 학습
+    # 4) 모델 학습 (RandomForest)
     # --------------------------------------------------------
     st.subheader("🔧 모델 학습 중...")
+
     models = {}
     for h in horizons:
-        rf = RandomForestClassifier(n_estimators=200, max_depth=6, random_state=42)
+        rf = RandomForestClassifier(
+            n_estimators=200,
+            max_depth=6,
+            random_state=42,
+        )
         rf.fit(X_train, y_train_dict[h])
         models[h] = rf
+
     st.success("모델 학습 완료!")
 
     # --------------------------------------------------------
-    # 5) 평가일 데이터 로딩
+    # 5) 평가일 데이터 로딩 (2분봉)
     # --------------------------------------------------------
     def load_eval_day():
         df = yf.download(
@@ -929,10 +944,10 @@ with tab5:
         return df.dropna()
 
     eval_df = load_eval_day()
-    st.write(f"📈 평가일 캔들 수: {len(eval_df)}")
+    st.write(f"📈 평가일 캔들 수: {len(eval_df) if eval_df is not None else 0}")
 
-    if eval_df is None or len(eval_df) < 50:
-        st.error("평가일 데이터가 너무 적습니다.")
+    if eval_df is None or eval_df.empty or len(eval_df) < 50:
+        st.error("평가일 데이터가 너무 적습니다. (최소 50캔들 필요)")
         st.stop()
 
     # --------------------------------------------------------
@@ -942,7 +957,7 @@ with tab5:
 
     results = []
 
-    # Close를 1D Series로
+    # 평가일 Close를 1D 시리즈로 변환
     close_raw = eval_df["Close"]
     if isinstance(close_raw, pd.DataFrame):
         close_raw = close_raw.iloc[:, 0]
@@ -950,122 +965,230 @@ with tab5:
 
     for t_idx in range(20, len(eval_df)):
 
+        # 시점 t까지의 데이터만 사용해서 피처 생성
         hist = eval_df.iloc[:t_idx]
         X_hist = make_features_tab5(hist)
-        if X_hist is None or len(X_hist) < 20:
+        if X_hist is None or X_hist.empty or len(X_hist) < 20:
             continue
 
         cur_time = hist.index[-1]
 
-        # 현재가 스칼라
+        # 현재가 (스칼라)
         hist_close_raw = hist["Close"]
         if isinstance(hist_close_raw, pd.DataFrame):
             hist_close_raw = hist_close_raw.iloc[:, 0]
-        cur_close = float(pd.to_numeric(hist_close_raw.iloc[-1], errors="coerce"))
+        cur_close_val = pd.to_numeric(hist_close_raw.iloc[-1], errors="coerce")
+        if not np.isfinite(cur_close_val):
+            continue
+        cur_close = float(cur_close_val)
+
+        # 최근 추세(마지막 20캔들 기준)로 기울기 계산
+        hist_close_series = pd.to_numeric(hist_close_raw, errors="coerce")
+        window = min(20, len(hist_close_series))
+        if window < 5:
+            continue
+        y_trend = hist_close_series.iloc[-window:].values
+        x_trend = np.arange(window)
+        slope, intercept = np.polyfit(x_trend, y_trend, 1)  # 1캔들당 변화량(2분당)
 
         for h in horizons:
+            # 모델이 예측한 상승 확률
             prob = models[h].predict_proba(X_hist.iloc[-1:].values)[0, 1]
 
-            # 실제 n분 뒤 가격
-            if t_idx + h < len(eval_df):
-                actual_price = float(pd.to_numeric(close_series.iloc[t_idx + h], errors="coerce"))
+            # 순수 추세 기반 예측 (2분봉이라 h/2 캔들 뒤)
+            steps = h / 2.0
+            trend_price = cur_close + slope * steps
+
+            # 확률 기반 가중치 (확신이 높을수록 추세를 더 믿는다)
+            confidence = 2 * abs(prob - 0.5)  # 0~1
+            w = 0.3 + 0.7 * confidence       # 최소 0.3, 최대 1.0
+            pred_price = cur_close + (trend_price - cur_close) * w
+
+            # 실제 h분 뒤 가격
+            if t_idx + int(steps) < len(eval_df):
+                actual_val = close_series.iloc[t_idx + int(steps)]
+                actual_price = float(actual_val) if np.isfinite(actual_val) else None
             else:
                 actual_price = None
 
-            results.append({
-                "time": cur_time,
-                "horizon": h,
-                "pred_prob": float(prob),
-                "pred_price":
-                    cur_close * (1 + (prob - 0.5) * 0.008),   # 예측선 약간 반영
-                "current_price": cur_close,
-                "actual_price": actual_price,
-            })
+            results.append(
+                {
+                    "time": cur_time,           # 예측을 만든 시점
+                    "horizon": h,              # 몇 분 뒤
+                    "pred_prob": float(prob),  # 상승 확률
+                    "current_price": cur_close,
+                    "pred_price": pred_price,  # 예측한 h분 뒤 가격
+                    "actual_price": actual_price,  # 실제 h분 뒤 가격
+                }
+            )
 
     res_df = pd.DataFrame(results)
     st.success("하루 전체 예측 완료!")
 
     # --------------------------------------------------------
-    # 7) n분 뒤 예측 vs 실제 차트
+    # 7) horizon별 성능 요약 (정량 지표)
     # --------------------------------------------------------
-    st.subheader("📉 예측 vs 실제 차트 (같은 시간축 상 비교)")
+    st.subheader("📊 성능 요약")
 
-    h_sel = st.selectbox("어떤 horizon(n분 뒤)을 보여줄까요?", horizons)
+    perf_rows = []
+    for h in horizons:
+        sub = res_df[res_df["horizon"] == h].copy()
+        if sub.empty:
+            continue
+
+        actual = pd.to_numeric(sub["actual_price"], errors="coerce").to_numpy()
+        pred = pd.to_numeric(sub["pred_price"], errors="coerce").to_numpy()
+        cur = pd.to_numeric(sub["current_price"], errors="coerce").to_numpy()
+
+        mask = np.isfinite(actual) & np.isfinite(pred) & np.isfinite(cur)
+        if mask.sum() == 0:
+            continue
+
+        actual = actual[mask]
+        pred = pred[mask]
+        cur = cur[mask]
+
+        # 방향 정확도: (실제 h분 뒤가 올랐는지) vs (예측이 오른다고 본지)
+        actual_dir = (actual > cur).astype(int)
+        pred_dir = (pred > cur).astype(int)
+        dir_acc = (actual_dir == pred_dir).mean()
+
+        mae = np.mean(np.abs(actual - pred))
+        mape = np.mean(np.abs(actual - pred) / actual)
+
+        perf_rows.append(
+            {
+                "horizon_min": h,
+                "samples": int(mask.sum()),
+                "direction_acc": dir_acc,
+                "MAE": mae,
+                "MAPE": mape,
+            }
+        )
+
+    if perf_rows:
+        perf_df = pd.DataFrame(perf_rows)
+        st.dataframe(
+            perf_df.style.format(
+                {"direction_acc": "{:.3f}", "MAE": "{:.4f}", "MAPE": "{:.3%}"}
+            ),
+            use_container_width=True,
+        )
+    else:
+        st.write("성능을 계산할 수 있는 유효한 샘플이 없습니다.")
+
+    # --------------------------------------------------------
+    # 8) n분 뒤 예측 차트 vs 실제 차트 + 오차 그래프
+    # --------------------------------------------------------
+    st.subheader("📉 예측 차트 vs 실제 차트")
+
+    h_sel = st.selectbox("어떤 horizon(몇 분 뒤)을 볼까요?", horizons)
 
     view = res_df[res_df["horizon"] == h_sel].copy()
-    if view.empty:
-        st.write("해당 horizon의 데이터가 없습니다.")
-        st.stop()
-
-    # 정리
     view["actual_num"] = pd.to_numeric(view["actual_price"], errors="coerce")
     view["pred_num"] = pd.to_numeric(view["pred_price"], errors="coerce")
-    view["current_num"] = pd.to_numeric(view["current_price"], errors="coerce")
+    view["cur_num"] = pd.to_numeric(view["current_price"], errors="coerce")
+    view = view.dropna(subset=["actual_num", "pred_num", "cur_num"])
 
-    view = view.dropna(subset=["actual_num", "pred_num", "current_num"])
-
-    # 차트 그리기
-    fig = go.Figure()
-
-    fig.add_trace(go.Scatter(
-        x=view["time"],
-        y=view["current_num"],
-        name="현재 가격",
-        line=dict(color="#808080"),
-    ))
-
-    fig.add_trace(go.Scatter(
-        x=view["time"],
-        y=view["pred_num"],
-        name=f"{h_sel}분 뒤 예상가",
-        line=dict(color="#6EA6FF", dash="dot"),
-    ))
-
-    fig.add_trace(go.Scatter(
-        x=view["time"],
-        y=view["actual_num"],
-        name=f"{h_sel}분 뒤 실제가격",
-        line=dict(color="#FF8A8A"),
-    ))
-
-    fig.update_layout(
-        title=f"{ticker} — {h_sel}분 뒤 예측 vs 실제 (KST)",
-        height=450,
-        xaxis_title="시간(KST)",
-        yaxis_title="가격",
-        legend=dict(orientation="h"),
-        margin=dict(l=10, r=10, t=50, b=10),
-    )
-
-    st.plotly_chart(fig, use_container_width=True)
-
-    # --------------------------------------------------------
-    # 8) 자동 해석
-    # --------------------------------------------------------
-    st.markdown("### 🧠 자동 해석")
-
-    # 오차
-    mae = np.mean(np.abs(view["actual_num"] - view["pred_num"]))
-    mape = np.mean(np.abs(view["actual_num"] - view["pred_num"]) / view["current_num"])
-
-    dir_acc = np.mean(
-        (view["actual_num"] > view["current_num"]) ==
-        (view["pred_num"] > view["current_num"])
-    )
-
-    st.write(f"• **방향 예측 정확도:** {dir_acc*100:.1f}%")
-    st.write(f"• **MAE(절대 오차):** {mae:.3f}")
-    st.write(f"• **MAPE(%)**: {mape*100:.2f}%")
-
-    st.markdown("---")
-
-    if dir_acc > 0.6:
-        st.success("📈 방향 예측력은 시장에서 사용할 만한 수준입니다.")
+    if view.empty:
+        st.write("선택한 horizon에 대해 표시할 데이터가 없습니다.")
     else:
-        st.warning("📉 방향 예측력이 낮아 단독으로 매매 판단에 쓰기엔 미흡합니다.")
+        # 1) 위: 예측 vs 실제 가격
+        fig_price = go.Figure()
+        fig_price.add_trace(
+            go.Scatter(
+                x=view["time"],
+                y=view["pred_num"],
+                name=f"{h_sel}분 뒤 예상가",
+                line=dict(color="#6EA6FF", dash="dot"),
+            )
+        )
+        fig_price.add_trace(
+            go.Scatter(
+                x=view["time"],
+                y=view["actual_num"],
+                name=f"{h_sel}분 뒤 실제가격",
+                line=dict(color="#FF8A8A"),
+            )
+        )
+        fig_price.update_layout(
+            title=f"{ticker} — {h_sel}분 뒤 예측 vs 실제 (KST)",
+            xaxis_title="예측 시점 (KST)",
+            yaxis_title=f"{h_sel}분 뒤 가격",
+            legend=dict(orientation="h"),
+            height=420,
+            margin=dict(l=10, r=10, t=50, b=10),
+        )
+        st.plotly_chart(fig_price, use_container_width=True)
 
-    if mape < 0.3:
-        st.success("🎯 가격 오차도 비교적 안정적입니다.")
-    else:
-        st.warning("⚠ 가격 오차가 커서 단타에서는 활용 주의가 필요합니다.")
+        # 2) 아래: 오차 그래프 (실제 - 예측)
+        err = view["actual_num"] - view["pred_num"]
+        fig_err = go.Figure()
+        fig_err.add_trace(
+            go.Scatter(
+                x=view["time"],
+                y=err,
+                name="오차(실제 - 예측)",
+                line=dict(color="#B7AC8D"),
+            )
+        )
+        fig_err.add_hline(y=0, line=dict(color="#CCCCCC", width=1, dash="dot"))
+        fig_err.update_layout(
+            title=f"{h_sel}분 뒤 예측 오차 (실제 - 예측)",
+            xaxis_title="예측 시점 (KST)",
+            yaxis_title="오차",
+            height=260,
+            margin=dict(l=10, r=10, t=40, b=10),
+        )
+        st.plotly_chart(fig_err, use_container_width=True)
+
+        # ----------------------------------------------------
+        # 9) 선택한 horizon에 대한 자동 해석
+        # ----------------------------------------------------
+        st.markdown("### 🧠 해석")
+
+        # 위에서 계산한 perf_df에서 h_sel 행 찾아서 쓰기 (없으면 즉석 계산)
+        sel_perf = None
+        if perf_rows:
+            for row in perf_rows:
+                if row["horizon_min"] == h_sel:
+                    sel_perf = row
+                    break
+
+        if sel_perf is not None:
+            dir_acc = sel_perf["direction_acc"]
+            mae = sel_perf["MAE"]
+            mape = sel_perf["MAPE"]
+            samples = sel_perf["samples"]
+        else:
+            actual = view["actual_num"].to_numpy()
+            pred = view["pred_num"].to_numpy()
+            cur = view["cur_num"].to_numpy()
+            samples = len(actual)
+            actual_dir = (actual > cur).astype(int)
+            pred_dir = (pred > cur).astype(int)
+            dir_acc = (actual_dir == pred_dir).mean()
+            mae = np.mean(np.abs(actual - pred))
+            mape = np.mean(np.abs(actual - pred) / actual)
+
+        st.write(f"- 샘플 수: **{samples}개**")
+        st.write(f"- 방향 예측 정확도: **{dir_acc*100:.1f}%**")
+        st.write(f"- MAE(평균 절대 오차): **{mae:.4f}**")
+        st.write(f"- MAPE(평균 절대 오차율): **{mape*100:.2f}%**")
+
+        st.markdown("---")
+
+        # 간단한 코멘트
+        if dir_acc > 0.6:
+            st.success("📈 방향은 꽤 잘 맞는 편입니다. 다른 필터(거래량, 지표)와 함께 쓰면 단타 시그널로 쓸 만한 수준입니다.")
+        elif dir_acc > 0.52:
+            st.info("➖ 방향이 약간 우위 정도입니다. 단독 매매보다는 보조 지표 느낌으로 쓰는 게 현실적입니다.")
+        else:
+            st.warning("📉 방향 예측력이 거의 코인 플립 수준이거나 그 이하입니다. 이 horizon은 실전에 쓰기 어렵습니다.")
+
+        if mape < 0.3:
+            st.success("🎯 가격 오차도 30% 미만이라, 대략적인 ‘가격 범위’ 감을 잡는 데는 쓸 수 있습니다.")
+        else:
+            st.warning("⚠ 가격 오차가 큰 편이라, 정확한 진입/청산 가격보다는 '방향' 중심으로만 참고하는 편이 낫습니다.")
+
 
