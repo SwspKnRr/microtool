@@ -1,305 +1,108 @@
 # core_micro.py
+import pandas as pd
+import numpy as np
+import yfinance as yf
 import datetime as dt
 
-import numpy as np
-import pandas as pd
-import yfinance as yf
-
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score, precision_score, recall_score
-
-def fetch_1min_intraday(ticker, days=3):
-    df = yf.download(
-        ticker,
-        period=f"{days}d",
-        interval="1m",
-        prepost=True,
-        progress=False
-    )
-    return df
-
-def fetch_1min_intraday(ticker, days=7):
+#############################################
+# 1. 데이터 다운로드 (1분봉)
+#############################################
+def fetch_1min_intraday(ticker: str, days: int = 10):
     """
-    yfinance는 1분봉을 최대 7일만 제공하므로 그 이상은 불가능.
-    days > 7 이면 7로 강제 조정.
+    1분봉 데이터를 n일치 가져온다.
+    yfinance는 7일 이상 1분봉 제공 안 하므로 1일씩 나눠서 병합한다.
     """
-    days = min(days, 7)
 
-    df = yf.download(
-        ticker,
-        period=f"{days}d",
-        interval="1m",
-        prepost=True,
-        progress=False
-    )
-    return df
-
-
-# ---------- RSI 계산 ---------- #
-def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    delta = series.diff()
-    up = delta.clip(lower=0)
-    down = -delta.clip(upper=0)
-
-    roll_up = up.rolling(period).mean()
-    roll_down = down.rolling(period).mean()
-
-    rs = roll_up / roll_down
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
-
-# ---------- 2분봉 데이터 다운로드 (최대 60일) ---------- #
-def fetch_2min_data(ticker: str, days: int = 60) -> pd.DataFrame:
-    """
-    최근 days일간 2분봉 데이터 다운로드 (yfinance 사용)
-    - interval="2m"
-    - prepost=True 로 프리/애프터 포함
-    - 주말(토/일) 제거
-    """
-    if days > 60:
-        days = 60  # yfinance 2m 최대 60일 제한
-
-    df = yf.download(
-        ticker,
-        period=f"{days}d",
-        interval="2m",
-        auto_adjust=True,
-        prepost=True,      # 프리장/애프터장 포함
-        progress=False,
-    )
-
-    if df is None or df.empty:
-        return df
-
-    # MultiIndex 정리 (티커 포함되어 올 수 있음)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [c[0] for c in df.columns]
-
-    df = df.rename(columns=str.title)  # open -> Open 등
-
-    # 타임존 제거 (naive datetime으로)
-    if hasattr(df.index, "tz"):
-        df = df.tz_localize(None)
-
-    df = df.sort_index()
-
-    # 주말 제거 (토:5, 일:6)
-    df = df[df.index.dayofweek < 5]
-
-    return df
-
-
-# ---------- 1분봉 실시간/단기 데이터 다운로드 (최대 7일) ---------- #
-def fetch_1min_intraday(ticker: str, days: int = 3) -> pd.DataFrame:
-    """
-    최근 days일간 1분봉 데이터 (실시간 시그널용)
-    - yfinance 1분봉 최대 7일
-    - prepost=True 로 프리/애프터 포함
-    - 주말 제거
-    """
-    if days > 7:
-        days = 7
-
-    df = yf.download(
-        ticker,
-        period=f"{days}d",
-        interval="1m",
-        auto_adjust=True,
-        prepost=True,
-        progress=False,
-    )
-
-    if df is None or df.empty:
-        return df
-
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [c[0] for c in df.columns]
-
-    df = df.rename(columns=str.title)
-
-    if hasattr(df.index, "tz"):
-        df = df.tz_localize(None)
-
-    df = df.sort_index()
-
-    # 주말 제거
-    df = df[df.index.dayofweek < 5]
-
-    return df
-
-
-# ---------- 피처 생성 ---------- #
-def build_feature_frame(
-    df_raw: pd.DataFrame,
-    sma_windows=(3, 5, 10),
-    rsi_periods=(2, 5),
-) -> pd.DataFrame:
-    df = df_raw.copy()
-
-    # 기본 수익률 (2분 수익률)
-    df["return_2m"] = df["Close"].pct_change()
-
-    # 단기 이동평균
-    for w in sma_windows:
-        df[f"sma_{w}"] = df["Close"].rolling(w).mean()
-
-    # 단기 모멘텀
-    df["mom_1"] = df["Close"].diff(1)
-    df["mom_3"] = df["Close"].diff(3)
-
-    # RSI
-    for p in rsi_periods:
-        df[f"rsi_{p}"] = compute_rsi(df["Close"], period=p)
-
-    # 거래량 스파이크 (Z-Score)
-    vol_mean = df["Volume"].rolling(30).mean()
-    vol_std = df["Volume"].rolling(30).std()
-    df["vol_z"] = (df["Volume"] - vol_mean) / (vol_std + 1e-9)
-    df["vol_spike"] = (df["vol_z"] > 2).astype(int)
-
-    # 시간 관련 피처
-    df["minute"] = df.index.minute
-    df["hour"] = df.index.hour
-    df["dayofweek"] = df.index.dayofweek
-
-    # 장 구분 (미국 기준 대략적인 구분)
-    # 프리장: 4~9시, 정규장: 9~16시, 애프터: 16~24 & 0~4
-    df["is_regular"] = ((df["hour"] >= 9) & (df["hour"] < 16)).astype(int)
-    df["is_premarket"] = ((df["hour"] >= 4) & (df["hour"] < 9)).astype(int)
-    df["is_after"] = ((df["hour"] >= 16) | (df["hour"] < 4)).astype(int)
-
-    return df
-
-
-# ---------- 타깃(미래 수익률 & 상승 여부) 생성 ---------- #
-def build_targets(
-    df_feat: pd.DataFrame,
-    base_horizons=(5, 10, 30),
-    custom_horizon: int | None = None,
-    threshold: float = 0.0,
-) -> tuple[pd.DataFrame, list[int]]:
-    """
-    base_horizons + custom_horizon(선택) 에 대해
-    - future_ret_{h}
-    - y_{h}  (미래 수익률 > threshold 이면 1, 아니면 0)
-    를 생성
-    """
-    df = df_feat.copy()
-
-    horizons = list(sorted(set(base_horizons)))
-    if custom_horizon is not None and custom_horizon > 0:
-        horizons.append(int(custom_horizon))
-        horizons = sorted(set(horizons))
-
-    for h in horizons:
-        future_price = df["Close"].shift(-h)
-        df[f"future_ret_{h}"] = future_price / df["Close"] - 1.0
-        df[f"y_{h}"] = (df[f"future_ret_{h}"] > threshold).astype(int)
-
-    # 미래 데이터가 없는 마지막 max(h) 구간 제거 + NaN 제거
-    max_h = max(horizons)
-    df = df.iloc[:-max_h].copy()
-    df = df.dropna()
-
-    return df, horizons
-
-
-# ---------- X, y 생성 ---------- #
-def get_feature_target_matrices(
-    df_model: pd.DataFrame,
-    horizons: list[int],
-) -> tuple[np.ndarray, dict[int, np.ndarray], list[str]]:
-    """
-    df_model에서 피처 컬럼과 타깃(y_{h})를 분리
-    """
-    exclude_prefixes = ("future_ret_", "y_")
-    exclude_exact = {"Open", "High", "Low", "Close", "Adj Close", "Volume"}
-
-    feature_cols = []
-    for c in df_model.columns:
-        if c in exclude_exact:
-            continue
-        if any(c.startswith(p) for p in exclude_prefixes):
-            continue
-        feature_cols.append(c)
-
-    X = df_model[feature_cols].values
-
-    y_dict: dict[int, np.ndarray] = {}
-    for h in horizons:
-        y_dict[h] = df_model[f"y_{h}"].values
-
-    return X, y_dict, feature_cols
-
-
-# ---------- 모델 학습 ---------- #
-def train_models(
-    X: np.ndarray,
-    y_dict: dict[int, np.ndarray],
-    random_state: int = 42,
-) -> tuple[dict[int, RandomForestClassifier], pd.DataFrame]:
-    """
-    각 horizon 별로 RandomForestClassifier 학습
-    - 시간 순서를 고려해서 앞 70% train, 뒤 30% test
-    """
-    n = X.shape[0]
-    if n < 200:
-        raise ValueError("데이터가 너무 적어서 모델 학습이 어렵습니다. (최소 200 샘플 권장)")
-
-    split_idx = int(n * 0.7)
-    X_train, X_test = X[:split_idx], X[split_idx:]
-
-    models: dict[int, RandomForestClassifier] = {}
-    rows = []
-
-    for h, y in y_dict.items():
-        y_train, y_test = y[:split_idx], y[split_idx:]
-
-        clf = RandomForestClassifier(
-            n_estimators=200,
-            max_depth=6,
-            min_samples_leaf=10,
-            random_state=random_state,
-            n_jobs=-1,
+    frames = []
+    for i in range(days):
+        end = dt.datetime.now() - dt.timedelta(days=i)
+        start = end - dt.timedelta(days=1)
+        df = yf.download(
+            ticker,
+            interval="1m",
+            start=start.strftime("%Y-%m-%d"),
+            end=end.strftime("%Y-%m-%d"),
+            progress=False,
         )
-        clf.fit(X_train, y_train)
+        if df is not None and len(df) > 0:
+            df["date"] = df.index
+            frames.append(df)
 
-        y_pred = clf.predict(X_test)
+    if len(frames) == 0:
+        return pd.DataFrame()
 
-        acc = float(accuracy_score(y_test, y_pred))
-        prec = float(precision_score(y_test, y_pred, zero_division=0))
-        rec = float(recall_score(y_test, y_pred, zero_division=0))
-
-        models[h] = clf
-        rows.append(
-            {
-                "horizon_min": h,
-                "accuracy": acc,
-                "precision": prec,
-                "recall": rec,
-                "support": int(y_test.shape[0]),
-            }
-        )
-
-    metrics_df = pd.DataFrame(rows).set_index("horizon_min")
-    return models, metrics_df
+    df_all = pd.concat(frames).sort_index()
+    df_all = df_all[~df_all.index.duplicated(keep="first")]
+    return df_all
 
 
-# ---------- 최신 시점에 대한 예측 ---------- #
-def predict_latest(
-    models: dict[int, RandomForestClassifier],
-    latest_row: pd.Series,
-    feature_cols: list[str],
-) -> dict[int, float]:
+#############################################
+# 2. 간단한 예측 모델 (5분, 15분, 종가)
+#############################################
+def predict_horizon(df, horizon_min: int = 5):
     """
-    최신 1개 row에 대해 각 horizon 별 상승 확률 (클래스 1 확률) 반환
+    horizon_min 분 뒤의 가격 변화를 예측하는 간단한 baseline 모델
+    모델: 최근 N분 평균 기울기 사용
     """
-    X_latest = latest_row[feature_cols].values.reshape(1, -1)
+    if df.empty:
+        return None
 
-    probs: dict[int, float] = {}
-    for h, clf in models.items():
-        p = float(clf.predict_proba(X_latest)[0, 1])
-        probs[h] = p
+    df = df.copy()
+    df["return"] = df["Close"].pct_change()
+    df["slope"] = df["Close"].diff()
 
-    return probs
+    window = horizon_min  # 매우 단순 baseline
+    df[f"pred_{horizon_min}m"] = df["slope"].rolling(window).mean()
+
+    return df
+
+
+#############################################
+# 3. 예측 결과 생성
+#############################################
+def generate_prediction(df, horizon_list=[5, 15]):
+    """
+    여러 horizon 한번에 수행
+    """
+    result = {}
+    for h in horizon_list:
+        temp = predict_horizon(df, horizon_min=h)
+        result[h] = temp
+    return result
+
+
+#############################################
+# 4. 과거 예측 정확도 검증
+#############################################
+def backtest_prediction(df, horizon=5):
+    """
+    (5번탭용) 과거 예측이 실제로 맞았는지 검증
+    """
+    df = df.copy()
+    df["future"] = df["Close"].shift(-horizon)
+    df["future_ret"] = df["future"].pct_change()
+
+    # 예측값
+    df["pred"] = df["Close"].diff().rolling(horizon).mean()
+
+    # 방향 정확도
+    df["pred_dir"] = np.sign(df["pred"])
+    df["real_dir"] = np.sign(df["future"] - df["Close"])
+
+    accuracy = (df["pred_dir"] == df["real_dir"]).mean()
+    return accuracy, df
+
+
+#############################################
+# 5. 전체 파이프라인 (4번탭 일괄 실행)
+#############################################
+def run_full_pipeline(ticker="SPY", days=10):
+    df = fetch_1min_intraday(ticker, days=days)
+    if df.empty:
+        return None
+
+    pred = generate_prediction(df, horizon_list=[5, 15])
+    return {
+        "raw": df,
+        "predictions": pred,
+    }
