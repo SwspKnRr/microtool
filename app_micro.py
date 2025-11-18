@@ -12,11 +12,8 @@ import streamlit as st
 import yfinance as yf
 from zoneinfo import ZoneInfo
 
-
-
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score
-
 
 from core_micro import (
     fetch_2min_data,
@@ -31,8 +28,6 @@ from core_micro import (
 # ---------- 한글 폰트 설정 (Windows 기준: 맑은 고딕) ---------- #
 matplotlib.rcParams["font.family"] = "Gulim"
 matplotlib.rcParams["axes.unicode_minus"] = False
-
-
 
 
 # ---------- 공통 유틸 함수들 (타임존 & 세션 처리) ---------- #
@@ -852,12 +847,14 @@ with tab5:
             prepost=True,
             progress=False
         )
-        df = df.tz_localize("UTC").tz_convert("Asia/Seoul")
+        if df is None or df.empty:
+            return df
+        df = to_kst(df)
         df = df[df.index.date <= train_end_date]
         return df.dropna()
 
     train_df = load_train_df()
-    if len(train_df) < 200:
+    if train_df is None or train_df.empty or len(train_df) < 200:
         st.error("훈련 데이터가 부족합니다.")
         st.stop()
 
@@ -903,7 +900,6 @@ with tab5:
 
     st.success("모델 학습 완료!")
 
-
     # =============================
     # 3) 평가일 하루 전체 데이터 로드
     # =============================
@@ -916,18 +912,18 @@ with tab5:
             prepost=True,
             progress=False
         )
-        df = df.tz_localize("UTC").tz_convert("Asia/Seoul")
+        if df is None or df.empty:
+            return df
+        df = to_kst(df)
         df = df[df.index.date == eval_date]
         return df.dropna()
 
     eval_df = load_eval_day()
-    st.write(f"📈 평가일 데이터 개수: {len(eval_df)}")
+    st.write(f"📈 평가일 데이터 개수: {len(eval_df) if eval_df is not None else 0}")
 
-    if len(eval_df) < 50:
+    if eval_df is None or eval_df.empty or len(eval_df) < 50:
         st.error("평가일 데이터가 너무 적음.")
         st.stop()
-
-
 
     # =============================
     # 4) 하루 종일 예측 루프
@@ -974,7 +970,6 @@ with tab5:
 
     st.success("하루 전체 예측 완료!")
 
-
     # =============================
     # 5) 성능 계산
     # =============================
@@ -1004,7 +999,6 @@ with tab5:
 
     perf_df = pd.DataFrame(perf_rows)
     st.dataframe(perf_df, use_container_width=True)
-
 
     # =============================
     # 6) 차트 시각화
@@ -1036,4 +1030,3 @@ with tab5:
     ))
 
     st.plotly_chart(fig, use_container_width=True)
-
