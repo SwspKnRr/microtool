@@ -858,18 +858,34 @@ with tab5:
         return df.dropna()
 
     train_df = load_train_df()
-    
+
     # ----- 피처 생성 -----
-    def make_features(df):
-        X = pd.DataFrame({
-            "ret1": df["Close"].pct_change(),
-            "ma5": df["Close"].rolling(5).mean(),
-            "ma20": df["Close"].rolling(20).mean(),
-            "vol": df["Volume"],
-        })
-        X["trend"] = df["Close"].diff()
-        X = X.dropna()
-        return X
+    def make_features(df: pd.DataFrame) -> pd.DataFrame:
+    # df가 비었거나 이상하면 그냥 빈 DataFrame 반환
+         if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+             return pd.DataFrame()
+
+         close = df["Close"]
+         vol = df["Volume"] if "Volume" in df.columns else pd.Series(index=df.index, data=np.nan)
+
+    # 🔹 index를 명시해서 생성 → 빈 시리즈여도 에러 안 남
+         X = pd.DataFrame(
+             {
+                  "ret1": close.pct_change(),
+                  "ma5": close.rolling(5).mean(),
+                  "ma20": close.rolling(20).mean(),
+                  "vol": vol,
+              },
+              index=df.index,
+    )
+
+         X["trend"] = close.diff()
+
+    # 전부 NaN인 초반부는 버림
+         X = X.dropna()
+
+         return X
+
 
     # horizon 설정 (5, 10, 30분 등 필요하면 변경)
     horizons = [5, 10, 30]
