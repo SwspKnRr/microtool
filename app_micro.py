@@ -1014,24 +1014,41 @@ with tab5:
 
     st.success("하루 전체 예측 완료!")
 
-    # =============================
+        # =============================
     # 5) 성능 계산
     # =============================
     st.subheader("📊 성능 요약")
 
     perf_rows = []
     for h in horizons:
-        sub = res_df[res_df["horizon"] == h].dropna()
+        # 해당 horizon만 추출
+        sub = res_df[res_df["horizon"] == h].copy()
 
-        if len(sub) == 0:
+        # 실제/현재/확률이 모두 있는 행만 사용
+        sub = sub.dropna(subset=["actual_price", "current_price", "pred_prob"])
+        if sub.empty:
             continue
 
-        actual_dir = (sub["actual_price"] > sub["current_price"]).astype(int)
-        pred_dir = (sub["pred_prob"] > 0.5).astype(int)
+        # 숫자로 강제 변환 (이 단계에서 object/문자/이상 타입 정리)
+        sub["actual_price_num"] = pd.to_numeric(sub["actual_price"], errors="coerce")
+        sub["current_price_num"] = pd.to_numeric(sub["current_price"], errors="coerce")
+        sub["pred_prob_num"] = pd.to_numeric(sub["pred_prob"], errors="coerce")
+
+        sub = sub.dropna(subset=["actual_price_num", "current_price_num", "pred_prob_num"])
+        if sub.empty:
+            continue
+
+        # numpy 배열로 꺼내서 순수 수치 연산 (pandas 비교 버그 회피)
+        actual_price = sub["actual_price_num"].to_numpy()
+        current_price = sub["current_price_num"].to_numpy()
+        pred_prob = sub["pred_prob_num"].to_numpy()
+
+        actual_dir = (actual_price > current_price).astype(int)
+        pred_dir = (pred_prob > 0.5).astype(int)
 
         acc = (actual_dir == pred_dir).mean()
-        mae = (sub["actual_price"] - sub["current_price"]).abs().mean()
-        mape = ((sub["actual_price"] - sub["current_price"]).abs() / sub["current_price"]).mean()
+        mae = np.abs(actual_price - current_price).mean()
+        mape = (np.abs(actual_price - current_price) / current_price).mean()
 
         perf_rows.append({
             "horizon": h,
@@ -1041,36 +1058,56 @@ with tab5:
             "MAPE": mape,
         })
 
+    if perf_rows:
+        perf_df = pd.DataFrame(perf_rows)
+        st.dataframe(perf_df, use_container_width=True)
+    else:
+        st.write("성능을 계산할 수 있는 유효한 샘플이 없습니다.")
+
+
     perf_df = pd.DataFrame(perf_rows)
     st.dataframe(perf_df, use_container_width=True)
 
-    # =============================
+        # =============================
     # 6) 차트 시각화
     # =============================
     st.subheader("📉 예측 vs 실제 차트")
 
     h_sel = st.selectbox("어떤 horizon을 볼까요?", horizons)
 
-    view_df = res_df[res_df["horizon"] == h_sel].dropna()
+    view_df = res_df[res_df["horizon"] == h_sel].copy()
+    view_df = view_df.dropna(subset=["actual_price", "current_price", "pred_prob"])
 
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=view_df["time"],
-        y=view_df["current_price"],
-        name="현재가",
-        line=dict(color="gray")
-    ))
-    fig.add_trace(go.Scatter(
-        x=view_df["time"],
-        y=view_df["actual_price"],
-        name="실제 H분 뒤 가격",
-        line=dict(color="red")
-    ))
-    fig.add_trace(go.Scatter(
-        x=view_df["time"],
-        y=(view_df["current_price"] * (1 + view_df["pred_prob"] * 0.004)),
-        name="예측 경향선",
-        line=dict(color="blue", dash="dot")
-    ))
+    if view_df.empty:
+        st.write("선택한 horizon에 대해 표시할 데이터가 없습니다.")
+    else:
+        view_df["actual_price_num"] = pd.to_numeric(view_df["actual_price"], errors="coerce")
+        view_df["current_price_num"] = pd.to_numeric(view_df["current_price"], errors="coerce")
+        view_df["pred_prob_num"] = pd.to_numeric(view_df["pred_prob"], errors="coerce")
 
-    st.plotly_chart(fig, use_container_width=True)
+        view_df = view_df.dropna(subset=["actual_price_num", "current_price_num", "pred_prob_num"])
+        if view_df.empty:
+            st.write("선택한 horizon에 대해 표시할 데이터가 없습니다.")
+        else:
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=view_df["time"],
+                y=view_df["current_price_num"],
+                name="현재가",
+                line=dict(color="gray")
+            ))
+            fig.add_trace(go.Scatter(
+                x=view_df["time"],
+                y=view_df["actual_price_num"],
+                name="실제 H분 뒤 가격",
+                line=dict(color="red")
+            ))
+            fig.add_trace(go.Scatter(
+                x=view_df["time"],
+                y=view_df["current_price_num"] * (1 + view_df["pred_prob_num"] * 0.004),
+                name="예측 경향선",
+                line=dict(color="blue", dash="dot")
+            ))
+
+            st.plotly_chart(fig, use_container_width=True)
+
