@@ -836,28 +836,29 @@ with tab5:
     st.write(f"📌 **평가할 날짜:** {eval_date}")
     st.write(f"📌 **훈련 데이터 종료일:** {train_end_date}")
 
-    # =============================
+        # =============================
     # 1) 훈련 데이터 로딩 (train_end_date까지)
     # =============================
     def load_train_df():
-        df = yf.download(
-            ticker,
-            period="60d",
-            interval="2m",
-            prepost=True,
-            progress=False
-        )
+        """
+        하루 힌드캐스트용 훈련 데이터:
+        - fetch_2min_data()로 최근 60일 2분봉을 받는다.
+        - KST로 변환 후, train_end_date 이전까지만 사용.
+        """
+        df = fetch_2min_data(ticker, days=60)
         if df is None or df.empty:
             return df
+
+        # 이미 1번 탭에서 쓰던 것과 동일한 방식으로 KST 변환
         df = to_kst(df)
+
+        # 평가일 직전까지만 사용 (train_end_date 기준)
         df = df[df.index.date <= train_end_date]
+
         return df.dropna()
 
     train_df = load_train_df()
-    if train_df is None or train_df.empty or len(train_df) < 200:
-        st.error("훈련 데이터가 부족합니다.")
-        st.stop()
-
+    
     # ----- 피처 생성 -----
     def make_features(df):
         X = pd.DataFrame({
@@ -877,12 +878,18 @@ with tab5:
     def make_target(df, horizon):
         return (df["Close"].shift(-horizon) > df["Close"]).astype(int)
 
-    # ----- X, y 생성 -----
+        # ----- X, y 생성 -----
     X_train = make_features(train_df)
+
+    if X_train is None or X_train.empty or len(X_train) < 50:
+        st.error("훈련 데이터에서 유효한 피처를 만들지 못했습니다. (샘플 수 부족)")
+        st.stop()
+
     y_train_dict = {
         h: make_target(train_df, h).loc[X_train.index]
         for h in horizons
     }
+
 
     # =============================
     # 2) 모델 학습
