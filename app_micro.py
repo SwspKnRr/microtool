@@ -392,7 +392,25 @@ with tab_live:
                 intraday_df = None
 
         if intraday_df is not None and not intraday_df.empty:
-            df_plot = intraday_df.tail(n_candles).copy()
+            # ---------- 차트 범위 선택: 최근 N캔들 vs 오늘 미국장 전체 ---------- #
+            view_mode = st.radio(
+                "차트 범위",
+                ("최근 N캔들", "오늘 미국장(프리+데이+애프터)"),
+                horizontal=True,
+            )
+
+            if view_mode == "최근 N캔들":
+                df_plot = intraday_df.tail(n_candles).copy()
+            else:
+                # 오늘(가장 최근 캔들 기준) 미국 날짜의 프리+데이+애프터만 보기
+                idx_et = intraday_df.index.tz_convert("America/New_York")
+                us_date = idx_et[-1].date()
+                mask_us = idx_et.date == us_date
+                df_plot = intraday_df[mask_us].copy()
+
+                # 혹시라도 비면 안전하게 최근 N캔들로 fallback
+                if df_plot.empty:
+                    df_plot = intraday_df.tail(n_candles).copy()
 
             last_price = df_plot["Close"].iloc[-1]
             last_time = df_plot.index[-1]  # KST
@@ -593,7 +611,6 @@ with tab_live:
                 shaded_regions.append((start_idx, len(times) - 1, session_mask[-1]))
 
                 shapes = []
-                # 배경 rect 먼저 shapes에 추가 (layer='below')
                 for start, end, label in shaded_regions:
                     color = session_colors.get(label)
                     if color is None:
@@ -613,7 +630,6 @@ with tab_live:
                         )
                     )
 
-                # 이후에 예측 수평선/annotation 추가
                 annotations = []
 
                 x_positions = {
@@ -692,6 +708,7 @@ with tab_live:
                         )
                     )
 
+                title_suffix = "최근 {n}개".format(n=n_candles) if view_mode == "최근 N캔들" else "오늘 미국장"
                 fig_c.update_layout(
                     dragmode=False,
                     xaxis=dict(fixedrange=True),
@@ -706,12 +723,13 @@ with tab_live:
                     xaxis_rangeslider_visible=False,
                     margin=dict(l=10, r=10, t=40, b=40),
                     height=450,
-                    title=f"{ticker} 1분봉 캔들 (최근 {n_candles}개, KST)",
+                    title=f"{ticker} 1분봉 캔들 ({title_suffix}, KST)",
                     shapes=shapes,
                     annotations=annotations,
                 )
 
                 st.plotly_chart(fig_c, use_container_width=True)
+
 
 
             with info_col:
