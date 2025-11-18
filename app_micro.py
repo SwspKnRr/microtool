@@ -1052,32 +1052,43 @@ with tab_backtest:
                 layer="below",
             )
 
-        # 예측 / 실제 라인
+# h_sel = 선택된 horizon (분)
+
+# 미래 시간축 생성 (ts + h_sel 분)
+        future_times = view["time"] + pd.to_timedelta(h_sel, unit="m")
+
+        fig_price = go.Figure()
+
+# --- 예측선 ---
         fig_price.add_trace(
-            go.Scatter(
-                x=view["time"],
-                y=view["pred_num"],
-                name=f"{h_sel}분 뒤 예상가",
-                line=dict(color="#6EA6FF", dash="dot"),
-            )
+             go.Scatter(
+                   x=future_times,
+                  y=view["pred_num"],
+                   name=f"{h_sel}분 뒤 예상가",
+                  line=dict(color="#6EA6FF", dash="dot"),
+             )
         )
+
+# --- 실제선 ---
         fig_price.add_trace(
-            go.Scatter(
-                x=view["time"],
-                y=view["actual_num"],
-                name=f"{h_sel}분 뒤 실제가격",
-                line=dict(color="#FF8A8A"),
-            )
+             go.Scatter(
+                 x=future_times,
+                 y=view["actual_num"],
+                 name=f"{h_sel}분 뒤 실제가격",
+                 line=dict(color="#FF8A8A"),
+             )
         )
+
         fig_price.update_layout(
-            title=f"{ticker} — {eval_us_date} (미국 기준) {h_sel}분 뒤 예측 vs 실제 (KST)",
-            xaxis_title="예측 시점 (KST)",
-            yaxis_title=f"{h_sel}분 뒤 가격",
-            legend=dict(orientation="h"),
-            height=420,
-            margin=dict(l=10, r=10, t=50, b=10),
+             title=f"{ticker} — {h_sel}분 뒤 예측 vs 실제 (실제 시간축 기준, KST)",
+                 xaxis_title="실제 시각 (KST)",
+                 yaxis_title=f"{h_sel}분 뒤 가격",
+                 legend=dict(orientation="h"),
+                 height=420,
+                 margin=dict(l=10, r=10, t=50, b=10),
         )
         st.plotly_chart(fig_price, use_container_width=True)
+
 
         err = view["actual_num"] - view["pred_num"]
         fig_err = go.Figure()
