@@ -913,25 +913,34 @@ with tab_backtest:
         st.write("선택한 horizon에 대해 표시할 데이터가 없습니다.")
     else:
         # 미래 시간축 생성 (ts + h_sel 분)
-        future_times = view["time"] + pd.to_timedelta(h_sel, unit="m")
+        # 파란선(예측)은 h분만큼 왼쪽으로 이동 = 예측 시점에 위치
+        pred_times = view["time"]
+
+# 빨간선(실제)은 h분 뒤의 실제 시각에 위치
+        actual_times = view["time"] + pd.to_timedelta(h_sel, unit="m")
 
         fig_price = go.Figure()
+
+# --- 예측선 (왼쪽) ---
         fig_price.add_trace(
-            go.Scatter(
-                x=future_times,
-                y=view["pred_num"],
-                name=f"{h_sel}분 뒤 예상가",
-                line=dict(color="#6EA6FF", dash="dot"),
+                 go.Scatter(
+                   x=pred_times,
+                  y=view["pred_num"],
+                  name=f"{h_sel}분 뒤 예상가",
+                 line=dict(color="#6EA6FF", dash="dot"),
+             )
             )
-        )
+
+# --- 실제선 (오른쪽) ---
         fig_price.add_trace(
-            go.Scatter(
-                x=future_times,
-                y=view["actual_num"],
-                name=f"{h_sel}분 뒤 실제가격",
-                line=dict(color="#FF8A8A"),
+                 go.Scatter(
+                    x=actual_times,
+                  y=view["actual_num"],
+                  name=f"{h_sel}분 뒤 실제가격",
+                  line=dict(color="#FF8A8A"),
+             )
             )
-        )
+
 
         fig_price.update_layout(
             title=f"{ticker} — {h_sel}분 뒤 예측 vs 실제 (실제 시간축 기준, KST)",
