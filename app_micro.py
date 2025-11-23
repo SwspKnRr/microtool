@@ -151,7 +151,7 @@ def run_training_pipeline(
         custom_horizon=int(custom_h) if custom_h else None,
     )
     X, y_dict, feature_cols = get_feature_target_matrices(model_df, horizons)
-    models, metrics_df = train_models(X, y_dict, random_state=random_state)
+    models, dir_models, metrics_df = train_models(X, y_dict, random_state=random_state)
 
     return {
         "feat_df": feat_df,
@@ -161,6 +161,7 @@ def run_training_pipeline(
         "y_dict": y_dict,
         "feature_cols": feature_cols,
         "models": models,
+        "dir_models": dir_models,
         "metrics": metrics_df,
     }
 
@@ -186,6 +187,7 @@ def init_state():
         "y_dict": None,
         "feature_cols": None,
         "models": None,
+        "dir_models": None,
         "metrics": None,
         "pred_log": None,          # 예측 로그 (DataFrame)
         "last_logged_time": None,  # 마지막으로 로그 찍은 1분봉 시각 (KST)
@@ -274,7 +276,7 @@ with tab_live:
                     st.session_state["raw_df"] = df_raw
                     for k in ["feat_df", "model_df", "horizons",
                               "X", "y_dict", "feature_cols",
-                              "models", "metrics"]:
+                              "models", "dir_models", "metrics"]:
                         st.session_state[k] = engine_out[k]
                     st.success(
                         f"엔진 준비 완료! ({ticker}, 최근 {days}일 2분봉, "
@@ -299,16 +301,23 @@ with tab_live:
 
     # ---- 1-2. 실시간 시그널 엔진 준비 여부 체크 ---- #
     models = st.session_state["models"]
+    dir_models = st.session_state["dir_models"]
     model_df = st.session_state["model_df"]
     feature_cols = st.session_state["feature_cols"]
     horizons_engine = st.session_state["horizons"]
 
-    if models is None or model_df is None or feature_cols is None or horizons_engine is None:
-        st.warning("먼저 위에서 🚀 원클릭 버튼으로 엔진을 한 번 학습시켜 주세요.")
+    if (
+        models is None
+        or dir_models is None
+        or model_df is None
+        or feature_cols is None
+        or horizons_engine is None
+    ):
+        st.warning("?? ? ???? ??? ???? ???")
     else:
         # ----- 최신 2분봉 기준 예측 결과 (테이블) ----- #
         latest_row = model_df.iloc[-1]
-        ret_preds = predict_latest(models, latest_row, feature_cols)  # {h: future_ret_pred}
+        ret_preds, dir_probs = predict_latest(models, latest_row, feature_cols, dir_models=dir_models)  # {h: future_ret_pred}
 
         st.markdown("### 🔮 현재(가장 최근 2분봉, KST) 기준 예측 수익률 / 가격")
 
@@ -428,12 +437,19 @@ with tab_live:
             # ===== horizon별 예측 가격 (회귀 기반, 선형 스케일링) ===== #
             preds: dict[int, float] = {}  # {horizon_min: pred_price}
             model_horizons = list(ret_preds.keys())
+            intraday_ret = df_plot["Close"].pct_change().dropna()
+
+            def _recent_vol(window_min: int) -> float | None:
+                if intraday_ret is None or intraday_ret.empty:
+                    return None
+                window = min(len(intraday_ret), max(5, window_min))
+                if window <= 1:
+                    return None
+                return float(intraday_ret.tail(window).std())
 
             def get_scaled_ret_for(target_min: int) -> float | None:
                 """
-                엔진이 가지고 있는 horizon 중 가장 가까운 h_model의
-                future_ret_pred 를 가져와서
-                target_min / h_model 비율만큼 선형 스케일링.
+                ?? ??? horizon ??? ??? ?? + ??? ?? ????.
                 """
                 if not model_horizons:
                     return None
@@ -441,7 +457,14 @@ with tab_live:
                 base_ret = ret_preds.get(nearest_h, None)
                 if base_ret is None:
                     return None
-                scale = target_min / nearest_h
+
+                vol_nearest = _recent_vol(nearest_h)
+                vol_target = _recent_vol(target_min)
+                vol_ratio = 1.0
+                if vol_nearest is not None and vol_target is not None and vol_nearest > 0:
+                    vol_ratio = vol_target / vol_nearest
+
+                scale = (target_min / nearest_h) * vol_ratio
                 return base_ret * scale
 
             for h_min, flag in horizon_flags.items():
