@@ -136,6 +136,7 @@ def run_training_pipeline(
     base_horizons: list[int],
     custom_h: int | None,
     random_state: int,
+    progress_cb=None,
 ):
     """
     공통 엔진:
@@ -144,14 +145,26 @@ def run_training_pipeline(
     - get_feature_target_matrices
     - train_models
     """
+    def step(pct: float, msg: str):
+        if progress_cb is not None:
+            try:
+                progress_cb(pct, msg)
+            except Exception:
+                pass
+
+    step(0.25, "피처 생성 중...")
     feat_df = build_feature_frame(df_raw)
+    step(0.45, "타깃 생성 중...")
     model_df, horizons = build_targets(
         feat_df,
         base_horizons=base_horizons,
         custom_horizon=int(custom_h) if custom_h else None,
     )
+    step(0.6, "행렬 준비 중...")
     X, y_dict, feature_cols = get_feature_target_matrices(model_df, horizons)
+    step(0.8, "모델 학습 중...")
     models, dir_models, metrics_df = train_models(X, y_dict, random_state=random_state)
+    step(0.95, "정리 중...")
 
     return {
         "feat_df": feat_df,
@@ -257,31 +270,43 @@ with tab_live:
     # ---- 1-1. 원클릭 파이프라인 실행 버튼 ---- #
     with st.expander("엔진 준비 (2분봉 다운로드 + 피처/타깃 + 모델 학습)", expanded=True):
         if st.button("🚀 2분봉 다운로드 + 피처/타깃 생성 + 모델 학습 (원클릭)"):
-            with st.spinner("2분봉 다운로드 및 모델 학습 중..."):
-                try:
-                    df_raw = fetch_2min_data(ticker, days=days)
-                    if df_raw is None or df_raw.empty:
-                        raise ValueError("받아온 2분봉 데이터가 비어 있습니다.")
-                    df_raw = to_kst(df_raw)
+            progress = st.progress(0.0, text="준비 중...")
 
-                    engine_out = run_training_pipeline(
-                        df_raw=df_raw,
-                        base_horizons=base_horizons,
-                        custom_h=int(custom_h) if custom_h else None,
-                        random_state=int(random_state),
-                    )
-                except Exception as e:
-                    st.error(f"엔진 준비 중 오류 발생: {e}")
-                else:
-                    st.session_state["raw_df"] = df_raw
-                    for k in ["feat_df", "model_df", "horizons",
-                              "X", "y_dict", "feature_cols",
-                              "models", "dir_models", "metrics"]:
-                        st.session_state[k] = engine_out[k]
-                    st.success(
-                        f"엔진 준비 완료! ({ticker}, 최근 {days}일 2분봉, "
-                        f"예측 horizon: {engine_out['horizons']})"
-                    )
+            def report(pct: float, msg: str):
+                pct = max(0.0, min(1.0, pct))
+                progress.progress(pct, text=f"{msg} ({int(pct * 100)}%)")
+
+            try:
+                report(0.05, "2분봉 다운로드 중...")
+                df_raw = fetch_2min_data(ticker, days=days)
+                if df_raw is None or df_raw.empty:
+                    raise ValueError("받아온 2분봉 데이터가 비어 있습니다.")
+
+                report(0.15, "KST 변환 중...")
+                df_raw = to_kst(df_raw)
+
+                report(0.2, "모델 파이프라인 시작...")
+                engine_out = run_training_pipeline(
+                    df_raw=df_raw,
+                    base_horizons=base_horizons,
+                    custom_h=int(custom_h) if custom_h else None,
+                    random_state=int(random_state),
+                    progress_cb=report,
+                )
+            except Exception as e:
+                progress.empty()
+                st.error(f"엔진 준비 중 오류 발생: {e}")
+            else:
+                report(1.0, "완료!")
+                st.session_state["raw_df"] = df_raw
+                for k in ["feat_df", "model_df", "horizons",
+                          "X", "y_dict", "feature_cols",
+                          "models", "dir_models", "metrics"]:
+                    st.session_state[k] = engine_out[k]
+                st.success(
+                    f"엔진 준비 완료! ({ticker}, 최근 {days}일 2분봉, "
+                    f"예측 horizon: {engine_out['horizons']})"
+                )
 
         metrics_df = st.session_state["metrics"]
         if metrics_df is not None:
