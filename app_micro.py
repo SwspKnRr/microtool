@@ -395,6 +395,14 @@ with tab_live:
             300: show_300,
         }
 
+        # 🔧 스케일링 모드 선택 (UI)
+        st.markdown("#### 🧮 수익률 스케일링 모드")
+        scale_mode = st.radio(
+            "스케일링 방식 선택",
+            ("선형(기본)", "제곱근 완화", "스케일링 없음"),
+            horizontal=True,
+        )
+
         if refresh_now:
             st.rerun()
 
@@ -434,7 +442,7 @@ with tab_live:
 
             open_kst, close_kst = get_kst_session_times(use_dst)
 
-            # ===== horizon별 예측 가격 (회귀 기반, 선형 스케일링) ===== #
+            # ===== horizon별 예측 가격 (회귀 기반, 스케일링 모드 적용) ===== #
             preds: dict[int, float] = {}  # {horizon_min: pred_price}
             model_horizons = list(ret_preds.keys())
             intraday_ret = df_plot["Close"].pct_change().dropna()
@@ -449,7 +457,7 @@ with tab_live:
 
             def get_scaled_ret_for(target_min: int) -> float | None:
                 """
-                ?? ??? horizon ??? ??? ?? + ??? ?? ????.
+                horizon? ??? ?? ??? ???? scale_mode+??? ??? ????.
                 """
                 if not model_horizons:
                     return None
@@ -457,6 +465,16 @@ with tab_live:
                 base_ret = ret_preds.get(nearest_h, None)
                 if base_ret is None:
                     return None
+                if nearest_h <= 0:
+                    return base_ret
+
+                ratio = target_min / nearest_h
+                if scale_mode == "??(??)":
+                    scale = ratio
+                elif scale_mode == "??? ??":
+                    scale = np.sqrt(ratio)
+                else:  # "???? ??"
+                    scale = 1.0
 
                 vol_nearest = _recent_vol(nearest_h)
                 vol_target = _recent_vol(target_min)
@@ -464,8 +482,7 @@ with tab_live:
                 if vol_nearest is not None and vol_target is not None and vol_nearest > 0:
                     vol_ratio = vol_target / vol_nearest
 
-                scale = (target_min / nearest_h) * vol_ratio
-                return base_ret * scale
+                return float(base_ret * scale * vol_ratio)
 
             for h_min, flag in horizon_flags.items():
                 if not flag:
@@ -534,8 +551,7 @@ with tab_live:
                             ),
                             decreasing=dict(
                                 line=dict(color="#6EA6FF"),
-                                fillcolor="#6EA6FF",
-                            ),
+                                fillcolor="#6EA6FF"),
                             name="1분봉",
                         )
                     ]
@@ -704,7 +720,8 @@ with tab_live:
                 st.caption(
                     "※ 모든 시간은 한국시간(KST, UTC+9) 기준입니다.\n"
                     "※ 정규장 시간대는 DST 체크박스에 따라 KST 22:30~05:00 또는 23:30~06:00으로 간주됩니다.\n"
-                    "※ 예상 가격은 2분봉 엔진이 직접 예측한 '미래 수익률(%)'을 현재가에 곱해 계산한 값입니다."
+                    "※ 예상 가격은 2분봉 엔진이 직접 예측한 '미래 수익률(%)'을 현재가에 곱해 계산한 값입니다.\n"
+                    f"※ 스케일링 모드: **{scale_mode}**"
                 )
 
             st.markdown("#### 🔎 최근 1분봉 원시 데이터 (마지막 5개, KST)")
@@ -935,35 +952,33 @@ with tab_backtest:
     if view.empty:
         st.write("선택한 horizon에 대해 표시할 데이터가 없습니다.")
     else:
-        # 미래 시간축 생성 (ts + h_sel 분)
-        # 파란선(예측)은 h분만큼 왼쪽으로 이동 = 예측 시점에 위치
+        # 미래 시간축 생성
+        # 파란선(예측)은 예측 시점에 위치 (왼쪽)
         pred_times = view["time"]
-
-# 빨간선(실제)은 h분 뒤의 실제 시각에 위치
+        # 빨간선(실제)은 h분 뒤 실제 시각에 위치 (오른쪽)
         actual_times = view["time"] + pd.to_timedelta(h_sel, unit="m")
 
         fig_price = go.Figure()
 
-# --- 예측선 (왼쪽) ---
+        # --- 예측선 (왼쪽) ---
         fig_price.add_trace(
-                 go.Scatter(
-                   x=pred_times,
-                  y=view["pred_num"],
-                  name=f"{h_sel}분 뒤 예상가",
-                 line=dict(color="#6EA6FF", dash="dot"),
-             )
+            go.Scatter(
+                x=pred_times,
+                y=view["pred_num"],
+                name=f"{h_sel}분 뒤 예상가",
+                line=dict(color="#6EA6FF", dash="dot"),
             )
+        )
 
-# --- 실제선 (오른쪽) ---
+        # --- 실제선 (오른쪽) ---
         fig_price.add_trace(
-                 go.Scatter(
-                    x=actual_times,
-                  y=view["actual_num"],
-                  name=f"{h_sel}분 뒤 실제가격",
-                  line=dict(color="#FF8A8A"),
-             )
+            go.Scatter(
+                x=actual_times,
+                y=view["actual_num"],
+                name=f"{h_sel}분 뒤 실제가격",
+                line=dict(color="#FF8A8A"),
             )
-
+        )
 
         fig_price.update_layout(
             title=f"{ticker} — {h_sel}분 뒤 예측 vs 실제 (실제 시간축 기준, KST)",

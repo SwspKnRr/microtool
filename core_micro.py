@@ -1,4 +1,4 @@
-﻿# core_micro.py
+# core_micro.py
 import datetime as dt
 
 import numpy as np
@@ -282,12 +282,11 @@ def _train_best_regressor(
         "hgb": HistGradientBoostingRegressor(random_state=random_state),
     }
 
-    best_name = None
     best_model = None
     best_rmse = np.inf
     best_metrics = {"MAE": np.nan, "RMSE": np.nan, "direction_acc": np.nan}
 
-    for name, base_model in candidates.items():
+    for base_model in candidates.values():
         maes = []
         rmses = []
         dirs = []
@@ -304,7 +303,6 @@ def _train_best_regressor(
 
         if rmse_avg < best_rmse:
             best_rmse = rmse_avg
-            best_name = name
             best_model = clone(base_model)
             best_metrics = {"MAE": mae_avg, "RMSE": rmse_avg, "direction_acc": dir_acc}
 
@@ -336,7 +334,6 @@ def train_models(
         dir_clf.fit(X, y_dir)
         dir_models[h] = dir_clf
 
-        # 방향 분류기 정확도 (마지막 폴드 기준)
         dir_acc_clf = np.nan
         try:
             last_train_idx, last_test_idx = list(TimeSeriesSplit(n_splits=n_splits).split(X))[-1]
@@ -384,10 +381,8 @@ def predict_latest(
             confidence = max(prob_up, 1.0 - prob_up)
             dir_probs[h] = prob_up
 
-            # 방향 불일치 시 약화 + 방향 보정
             if np.sign(r) != sign_clf:
                 r = abs(r) * sign_clf * 0.5
-            # 자신감 낮으면 크기 축소
             if confidence < min_confidence:
                 r *= 0.5
 
