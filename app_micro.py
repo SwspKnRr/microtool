@@ -558,6 +558,49 @@ with tab_live:
                     )
                     st.session_state["last_logged_time"] = last_time
 
+            # --- 장기(일/주/월) 예상가 계산 --- #
+            long_horizons = {
+                "내일(+1일)": 1440,
+                "1주 뒤(+7일)": 7 * 1440,
+                "한 달 뒤(+30일)": 30 * 1440,
+            }
+            long_rows = []
+            for label, h_min in long_horizons.items():
+                r_scaled = get_scaled_ret_for(h_min)
+                if r_scaled is None:
+                    continue
+                price_pred = last_price * (1.0 + r_scaled)
+                long_rows.append({"기간": label, "예상가": price_pred, "예상수익률": r_scaled})
+
+            # --- 추세 감지 (최근 200개 1분봉) --- #
+            trend_label = "횡보"
+            trend_strength = ""
+            trend_run_minutes: int | None = None
+            if len(df_plot) > 5:
+                closes = df_plot["Close"].tail(200)
+                x = np.arange(len(closes))
+                y = np.log(closes)
+                if len(x) > 1:
+                    slope = float(np.polyfit(x, y, 1)[0])
+                    if slope > 0.0:
+                        trend_label = "상승"
+                    elif slope < 0.0:
+                        trend_label = "하락"
+                    if abs(slope) > 0:
+                        trend_strength = f"slope={slope:.4e}"
+
+                ret_signs = np.sign(closes.pct_change().dropna())
+                if not ret_signs.empty:
+                    last_sign = ret_signs.iloc[-1]
+                    run = 0
+                    for sgn in reversed(ret_signs):
+                        if sgn == last_sign and sgn != 0:
+                            run += 1
+                        else:
+                            break
+                    if run > 0:
+                        trend_run_minutes = run
+
             # 메인 레이아웃: 차트(좌) + 정보(우)
             chart_col, info_col = st.columns([4, 1])
 
@@ -734,6 +777,27 @@ with tab_live:
 
                 if pred_close is not None and np.isfinite(pred_close):
                     st.metric(label="종가 예상", value=f"{pred_close:,.2f}")
+
+                if long_rows:
+                    st.markdown("#### 📅 장기 예상가")
+                    long_df = pd.DataFrame(long_rows).set_index("기간")
+                    st.dataframe(
+                        long_df.style.format(
+                            {
+                                "예상가": "{:.2f}",
+                                "예상수익률": "{:.3%}",
+                            }
+                        ),
+                        use_container_width=True,
+                    )
+
+                st.markdown("#### 📈 현재 추세")
+                trend_desc = trend_label
+                if trend_run_minutes:
+                    trend_desc += f" (최근 {trend_run_minutes}분 연속 동일 방향)"
+                st.write(trend_desc)
+                if trend_strength:
+                    st.caption(f"추세 기울기: {trend_strength}")
 
                 st.markdown("#### 🕒 시각 (KST)")
                 st.write(last_time.strftime("%Y-%m-%d %H:%M:%S"))
